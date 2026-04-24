@@ -1,6 +1,6 @@
 //go:build luajit && !windows
 
-package loader
+package defgraph
 
 import (
 	"fmt"
@@ -10,36 +10,50 @@ import (
 	"strconv"
 	"strings"
 
-	"defgraph/internal/luavalue"
-	"defgraph/internal/types"
+	"sc_cli/internal/collections"
 
 	lua "github.com/aarzilli/golua/lua"
-	"github.com/emirpasic/gods/sets/linkedhashset"
 )
 
 type clonedTableMetadata struct {
-	ParentDefID types.Option[types.DefID]
-	Baseline    luavalue.Object
+	ParentDefID Option[DefID]
+	Baseline    LuaObject
+}
+
+type traversalScratch struct {
+	visited *collections.HashSet[uintptr]
+}
+
+func newTraversalScratch() traversalScratch {
+	return traversalScratch{visited: collections.NewHashSet[uintptr]()}
+}
+
+func (scratch *traversalScratch) reset() *collections.HashSet[uintptr] {
+	if scratch.visited == nil {
+		scratch.visited = collections.NewHashSet[uintptr]()
+		return scratch.visited
+	}
+
+	scratch.visited.Clear()
+	return scratch.visited
 }
 
 type runtime struct {
 	L                      *lua.State
 	repoRoot               string
 	compiledRoot           string
-	filesLoaded            []types.ScriptPath
-	loadedSet              *linkedhashset.Set
-	defSourceFile          map[types.DefID]types.ScriptPath
-	preUpgradeRequiredShip map[types.DefID]luavalue.Value
+	filesLoaded            []ScriptPath
+	scriptStack            []ScriptPath
+	loadedSet              *collections.OrderedSet[ScriptPath]
+	defSourceFile          *collections.HashMap[DefID, ScriptPath]
+	preUpgradeRequiredShip map[DefID]LuaValue
 	warnings               []string
-	tableMetadata          map[uintptr]clonedTableMetadata
-	defTableIDs            map[uintptr]types.DefID
+	tableMetadata          *collections.HashMap[uintptr, clonedTableMetadata]
+	defTableIDs            *collections.HashMap[uintptr, DefID]
+	traversal              traversalScratch
 }
 
-func Load(repoRoot string, compiledRoot string) (*types.World, error) {
-	if err := requireCompiledRoot(compiledRoot); err != nil {
-		return nil, err
-	}
-
+func LoadWorld(repoRoot string, compiledRoot string) (*World, error) {
 	repoRoot = NormalizeRepoRoot(repoRoot)
 	compiledRoot = NormalizeCompiledRoot(compiledRoot)
 
@@ -47,10 +61,11 @@ func Load(repoRoot string, compiledRoot string) (*types.World, error) {
 		L:             lua.NewState(),
 		repoRoot:      repoRoot,
 		compiledRoot:  compiledRoot,
-		loadedSet:     linkedhashset.New(),
-		defSourceFile: map[types.DefID]types.ScriptPath{},
-		tableMetadata: map[uintptr]clonedTableMetadata{},
-		defTableIDs:   map[uintptr]types.DefID{},
+		loadedSet:     collections.NewOrderedSet[ScriptPath](),
+		defSourceFile: collections.NewHashMap[DefID, ScriptPath](),
+		tableMetadata: collections.NewHashMap[uintptr, clonedTableMetadata](),
+		defTableIDs:   collections.NewHashMap[uintptr, DefID](),
+		traversal:     newTraversalScratch(),
 	}
 	defer rt.L.Close()
 
@@ -65,7 +80,7 @@ func Load(repoRoot string, compiledRoot string) (*types.World, error) {
 		}
 	}
 
-	if !rt.loadedSet.Contains(types.ScriptPath(moduleUpgradeChainScript)) {
+	if !rt.loadedSet.Contains(ScriptPath(moduleUpgradeChainScript)) {
 		if rt.preUpgradeRequiredShip == nil {
 			rt.preUpgradeRequiredShip = rt.capturePreUpgradeRequiredShip()
 		}
@@ -79,12 +94,12 @@ func Load(repoRoot string, compiledRoot string) (*types.World, error) {
 		return nil, err
 	}
 
-	return &types.World{
+	return &World{
 		RepoRoot:               repoRoot,
 		CompiledRoot:           compiledRoot,
-		Loader:                 types.LoaderNameGoLua,
-		LoaderRuntime:          types.LoaderRuntimeLuaJIT,
-		FilesLoaded:            append([]types.ScriptPath(nil), rt.filesLoaded...),
+		Loader:                 LoaderNameGoLua,
+		LoaderRuntime:          LoaderRuntimeLuaJIT,
+		FilesLoaded:            append([]ScriptPath(nil), rt.filesLoaded...),
 		Warnings:               append([]string(nil), rt.warnings...),
 		Defs:                   defs,
 		Enums:                  rt.captureEnums(),
@@ -117,6 +132,10 @@ func (rt *runtime) setupEnvironment() error {
 	rt.L.SetGlobal("strings")
 	rt.pushString("en")
 	rt.L.SetGlobal("lang")
+
+	if err := rt.setupDefTracking(); err != nil {
+		return err
+	}
 
 	rt.setGlobalFunction("dprint", func(L *lua.State) int { return 0 })
 	rt.setGlobalFunction("ScriptWriteFile", func(L *lua.State) int {
@@ -200,7 +219,7 @@ func (rt *runtime) setupEnvironment() error {
 	}
 
 	rt.L.GetGlobal("ai")
-	rt.pushString(types.DontInheritSentinel)
+	rt.pushString(DontInheritSentinel)
 	rt.L.SetField(-2, "DONT_INHERIT")
 	rt.L.Pop(1)
 
@@ -246,7 +265,7 @@ func (rt *runtime) setupBootstrapTables() error {
 	rt.L.Pop(1)
 
 	rt.setGlobalFunction("GetStoreItemTypeByDef", func(L *lua.State) int {
-		defID := types.DefID(L.ToString(1))
+		defID := DefID(L.ToString(1))
 		fields, ok := rt.worldDefFields(defID)
 		if !ok {
 			L.PushNil()
@@ -275,6 +294,34 @@ func (rt *runtime) setupBootstrapTables() error {
 		return 1
 	})
 
+	return nil
+}
+
+func (rt *runtime) setupDefTracking() error {
+	rt.L.GetGlobal("Def")
+	defer rt.L.Pop(1)
+
+	if rt.L.Type(-1) != lua.LUA_TTABLE {
+		return fmt.Errorf("Def must be a table during runtime setup")
+	}
+
+	absolute := rt.absIndex(-1)
+	rt.L.NewTable()
+	rt.L.SetMetaMethod("__newindex", func(L *lua.State) int {
+		if L.Type(2) == lua.LUA_TSTRING && L.Type(3) == lua.LUA_TTABLE {
+			defID := DefID(rt.stackValueString(2))
+			if sourceFile, ok := rt.currentScriptSource(); ok && !rt.defSourceFile.Contains(defID) {
+				rt.defSourceFile.Put(defID, sourceFile)
+			}
+			rt.defTableIDs.Put(L.ToPointer(3), defID)
+		}
+
+		L.PushValue(2)
+		L.PushValue(3)
+		L.RawSet(1)
+		return 0
+	})
+	rt.L.SetMetaTable(absolute)
 	return nil
 }
 
@@ -345,8 +392,8 @@ func (rt *runtime) setupSys() error {
 	rt.L.NewTable()
 	rt.setFieldFunction(-1, "execscript", func(L *lua.State) int {
 		path := L.ToString(1)
-		normalized := types.ScriptPath(normalizeLogicalPath(path))
-		if normalized == types.ScriptPath(moduleUpgradeChainScript) && rt.preUpgradeRequiredShip == nil {
+		normalized := ScriptPath(normalizeLogicalPath(path))
+		if normalized == ScriptPath(moduleUpgradeChainScript) && rt.preUpgradeRequiredShip == nil {
 			rt.preUpgradeRequiredShip = rt.capturePreUpgradeRequiredShip()
 		}
 		if err := rt.doFile(normalized.String()); err != nil {
@@ -363,16 +410,16 @@ func (rt *runtime) setupSys() error {
 			return 1
 		}
 
-		if err := rt.cloneValue(1, map[uintptr]struct{}{}); err != nil {
+		if err := rt.cloneValue(1, rt.beginTraversal()); err != nil {
 			panic(err)
 		}
 		if L.IsTable(-1) {
 			ptr := L.ToPointer(-1)
 			meta := clonedTableMetadata{
 				ParentDefID: parent,
-				Baseline:    rt.tableToObject(-1, map[uintptr]bool{}),
+				Baseline:    rt.tableToObject(-1, rt.beginTraversal()),
 			}
-			rt.tableMetadata[ptr] = meta
+			rt.tableMetadata.Put(ptr, meta)
 		}
 		return 1
 	})
@@ -502,7 +549,7 @@ func (rt *runtime) makeVectorFunction(kind string, keys ...string) lua.LuaGoFunc
 }
 
 func (rt *runtime) doFile(rel string) error {
-	normalized := types.ScriptPath(normalizeLogicalPath(rel))
+	normalized := ScriptPath(normalizeLogicalPath(rel))
 	if rt.loadedSet.Contains(normalized) {
 		return nil
 	}
@@ -512,7 +559,11 @@ func (rt *runtime) doFile(rel string) error {
 		return err
 	}
 
-	before := rt.currentDefKeys()
+	rt.scriptStack = append(rt.scriptStack, normalized)
+	defer func() {
+		rt.scriptStack = rt.scriptStack[:len(rt.scriptStack)-1]
+	}()
+
 	if err := rt.L.DoFile(path); err != nil {
 		if strings.Contains(err.Error(), "cannot load incompatible bytecode") {
 			return fmt.Errorf("%w (logical path: %s, runtime: %s). the linked LuaJIT build cannot execute this chunk; for this project you need the exact game-era LuaJIT runtime, not an arbitrary distro package", err, normalized, rt.runtimeDescriptor())
@@ -522,18 +573,6 @@ func (rt *runtime) doFile(rel string) error {
 
 	rt.loadedSet.Add(normalized)
 	rt.filesLoaded = append(rt.filesLoaded, normalized)
-
-	after := rt.currentDefKeys()
-	for key := range after {
-		if _, ok := before[key]; ok {
-			continue
-		}
-		if _, recorded := rt.defSourceFile[key]; !recorded {
-			rt.defSourceFile[key] = normalized
-		}
-	}
-
-	rt.refreshDefTableIDs()
 	return nil
 }
 
@@ -577,53 +616,40 @@ func (rt *runtime) tableStringField(index int, field string) string {
 	return strings.TrimSpace(rt.L.ToString(-1))
 }
 
-func (rt *runtime) currentDefKeys() map[types.DefID]struct{} {
-	out := map[types.DefID]struct{}{}
+func (rt *runtime) capturePreUpgradeRequiredShip() map[DefID]LuaValue {
+	out := map[DefID]LuaValue{}
 	rt.withGlobalTable("Def", func(index int) {
 		rt.forEachTable(index, func(keyIndex int, valueIndex int) {
 			if rt.L.Type(keyIndex) != lua.LUA_TSTRING || rt.L.Type(valueIndex) != lua.LUA_TTABLE {
 				return
 			}
-			out[types.DefID(rt.stackValueString(keyIndex))] = struct{}{}
-		})
-	})
-	return out
-}
-
-func (rt *runtime) capturePreUpgradeRequiredShip() map[types.DefID]luavalue.Value {
-	out := map[types.DefID]luavalue.Value{}
-	rt.withGlobalTable("Def", func(index int) {
-		rt.forEachTable(index, func(keyIndex int, valueIndex int) {
-			if rt.L.Type(keyIndex) != lua.LUA_TSTRING || rt.L.Type(valueIndex) != lua.LUA_TTABLE {
-				return
-			}
-			defID := types.DefID(rt.stackValueString(keyIndex))
+			defID := DefID(rt.stackValueString(keyIndex))
 			rt.L.GetField(valueIndex, "required_ship")
 			defer rt.L.Pop(1)
 			if rt.L.IsNoneOrNil(-1) {
 				return
 			}
-			out[defID] = rt.luaValue(-1, map[uintptr]bool{})
+			out[defID] = rt.luaValue(-1, rt.beginTraversal())
 		})
 	})
 	return out
 }
 
-func (rt *runtime) captureDefs() (map[types.DefID]types.RawDef, error) {
-	out := map[types.DefID]types.RawDef{}
+func (rt *runtime) captureDefs() (map[DefID]RawDef, error) {
+	out := map[DefID]RawDef{}
 	rt.withGlobalTable("Def", func(index int) {
 		rt.forEachTable(index, func(keyIndex int, valueIndex int) {
 			if rt.L.Type(keyIndex) != lua.LUA_TSTRING || rt.L.Type(valueIndex) != lua.LUA_TTABLE {
 				return
 			}
 
-			id := types.DefID(rt.stackValueString(keyIndex))
-			fields := rt.tableToObject(valueIndex, map[uintptr]bool{})
+			id := DefID(rt.stackValueString(keyIndex))
+			fields := rt.tableToObject(valueIndex, rt.beginTraversal())
 			ptr := rt.L.ToPointer(valueIndex)
-			meta, hasMeta := rt.tableMetadata[ptr]
+			meta, hasMeta := rt.tableMetadata.Get(ptr)
 
-			inherit := types.None[types.DefID]()
-			localFields := fields.Clone()
+			inherit := None[DefID]()
+			localFields := fields
 			if hasMeta {
 				localFields = diffObjectFields(meta.Baseline, fields)
 				inherit = meta.ParentDefID
@@ -631,14 +657,15 @@ func (rt *runtime) captureDefs() (map[types.DefID]types.RawDef, error) {
 			if rawInherit, ok := fields.Get("inherit"); ok {
 				if inherit.IsAbsent() {
 					if value, present := rawInherit.AsString(); present && value != "" {
-						inherit = types.Some(types.DefID(value))
+						inherit = Some(DefID(value))
 					}
 				}
 			}
 
-			out[id] = types.RawDef{
+			sourceFile, _ := rt.defSourceFile.Get(id)
+			out[id] = RawDef{
 				ID:            id,
-				SourceFile:    rt.defSourceFile[id],
+				SourceFile:    sourceFile,
 				LocalFields:   localFields,
 				InheritParent: inherit,
 			}
@@ -647,8 +674,8 @@ func (rt *runtime) captureDefs() (map[types.DefID]types.RawDef, error) {
 	return out, nil
 }
 
-func (rt *runtime) captureEnums() types.EnumRegistry {
-	registry := types.EnumRegistry{}
+func (rt *runtime) captureEnums() EnumRegistry {
+	registry := EnumRegistry{}
 
 	rt.withGlobal("ItemSubtype", func() {
 		registry.ItemSubtype = rt.enumFromStackTop()
@@ -667,16 +694,16 @@ func (rt *runtime) captureEnums() types.EnumRegistry {
 	return registry
 }
 
-func (rt *runtime) enumField(field string) types.EnumTable {
+func (rt *runtime) enumField(field string) EnumTable {
 	rt.L.GetField(-1, field)
 	defer rt.L.Pop(1)
 	return rt.enumFromStackTop()
 }
 
-func (rt *runtime) enumFromStackTop() types.EnumTable {
-	enum := types.EnumTable{
-		ByName:  map[string]int64{},
-		ByValue: map[int64]string{},
+func (rt *runtime) enumFromStackTop() EnumTable {
+	enum := EnumTable{
+		ByName:  collections.NewHashMap[string, int64](),
+		ByValue: collections.NewHashMap[int64, string](),
 	}
 	if rt.L.Type(-1) != lua.LUA_TTABLE {
 		return enum
@@ -697,7 +724,7 @@ func (rt *runtime) enumFromStackTop() types.EnumTable {
 			return
 		}
 		name := rt.stackValueString(keyIndex)
-		enum.ByName[name] = value
+		enum.ByName.Put(name, value)
 		entries = append(entries, entry{name: name, value: value})
 	})
 
@@ -709,10 +736,10 @@ func (rt *runtime) enumFromStackTop() types.EnumTable {
 	})
 
 	for _, item := range entries {
-		if _, ok := enum.ByValue[item.value]; ok {
+		if _, ok := enum.ByValue.Get(item.value); ok {
 			continue
 		}
-		enum.ByValue[item.value] = item.name
+		enum.ByValue.Put(item.value, item.name)
 	}
 
 	return enum
@@ -741,11 +768,11 @@ func (rt *runtime) mergeTables(dstIndex int, srcIndex int) error {
 			rt.L.Pop(1)
 		}
 
-		if err := rt.cloneValue(keyIndex, map[uintptr]struct{}{}); err != nil {
+		if err := rt.cloneValue(keyIndex, rt.beginTraversal()); err != nil {
 			rt.L.Pop(1)
 			return err
 		}
-		if err := rt.cloneValue(valueIndex, map[uintptr]struct{}{}); err != nil {
+		if err := rt.cloneValue(valueIndex, rt.beginTraversal()); err != nil {
 			rt.L.Pop(2)
 			return err
 		}
@@ -755,7 +782,7 @@ func (rt *runtime) mergeTables(dstIndex int, srcIndex int) error {
 	return nil
 }
 
-func (rt *runtime) cloneValue(index int, seen map[uintptr]struct{}) error {
+func (rt *runtime) cloneValue(index int, seen *collections.HashSet[uintptr]) error {
 	absolute := rt.absIndex(index)
 	switch rt.L.Type(absolute) {
 	case lua.LUA_TNIL:
@@ -778,12 +805,12 @@ func (rt *runtime) cloneValue(index int, seen map[uintptr]struct{}) error {
 		rt.L.PushString(rt.stackValueString(absolute))
 	case lua.LUA_TTABLE:
 		ptr := rt.L.ToPointer(absolute)
-		if _, ok := seen[ptr]; ok {
+		if seen.Contains(ptr) {
 			rt.L.PushNil()
 			return nil
 		}
-		seen[ptr] = struct{}{}
-		defer delete(seen, ptr)
+		seen.Add(ptr)
+		defer seen.Remove(ptr)
 
 		rt.L.NewTable()
 		destIndex := rt.absIndex(-1)
@@ -816,49 +843,49 @@ func (rt *runtime) cloneValue(index int, seen map[uintptr]struct{}) error {
 	return nil
 }
 
-func (rt *runtime) luaValue(index int, visited map[uintptr]bool) luavalue.Value {
+func (rt *runtime) luaValue(index int, visited *collections.HashSet[uintptr]) LuaValue {
 	switch rt.L.Type(index) {
 	case lua.LUA_TNIL:
-		return luavalue.Null()
+		return LuaNull()
 	case lua.LUA_TBOOLEAN:
-		return luavalue.Bool(rt.L.ToBoolean(index))
+		return LuaBool(rt.L.ToBoolean(index))
 	case lua.LUA_TSTRING:
-		return luavalue.String(rt.stackValueString(index))
+		return LuaString(rt.stackValueString(index))
 	case lua.LUA_TNUMBER:
 		number, isInteger, ok := rt.luaNumericValue(index)
 		if !ok {
-			return luavalue.String(rt.stackValueString(index))
+			return LuaString(rt.stackValueString(index))
 		}
 		if isInteger {
-			return luavalue.Int(int64(number))
+			return LuaInt(int64(number))
 		}
-		return luavalue.Float(number)
+		return LuaFloat(number)
 	case lua.LUA_TTABLE:
-		return luavalue.ObjectValue(rt.tableToObject(index, visited))
+		return LuaObjectValue(rt.tableToObject(index, visited))
 	case lua.LUA_TUSERDATA:
 		number, isInteger, ok := rt.luaNumericValue(index)
 		if !ok {
-			return luavalue.String(rt.stackValueString(index))
+			return LuaString(rt.stackValueString(index))
 		}
 		if isInteger {
-			return luavalue.Int(int64(number))
+			return LuaInt(int64(number))
 		}
-		return luavalue.Float(number)
+		return LuaFloat(number)
 	default:
-		return luavalue.String(rt.stackValueString(index))
+		return LuaString(rt.stackValueString(index))
 	}
 }
 
-func (rt *runtime) tableToObject(index int, visited map[uintptr]bool) luavalue.Object {
+func (rt *runtime) tableToObject(index int, visited *collections.HashSet[uintptr]) LuaObject {
 	absolute := rt.absIndex(index)
 	ptr := rt.L.ToPointer(absolute)
-	if visited[ptr] {
-		return luavalue.NewObject()
+	if visited.Contains(ptr) {
+		return NewLuaObject()
 	}
-	visited[ptr] = true
-	defer delete(visited, ptr)
+	visited.Add(ptr)
+	defer visited.Remove(ptr)
 
-	out := luavalue.NewObject()
+	out := NewLuaObject()
 	rt.forEachTable(absolute, func(keyIndex int, valueIndex int) {
 		out.Set(rt.luaKeyToString(keyIndex), rt.luaValue(valueIndex, visited))
 	})
@@ -893,25 +920,14 @@ func (rt *runtime) luaKeyToString(index int) string {
 	}
 }
 
-func (rt *runtime) refreshDefTableIDs() {
-	rt.withGlobalTable("Def", func(index int) {
-		rt.forEachTable(index, func(keyIndex int, valueIndex int) {
-			if rt.L.Type(keyIndex) != lua.LUA_TSTRING || rt.L.Type(valueIndex) != lua.LUA_TTABLE {
-				return
-			}
-			rt.defTableIDs[rt.L.ToPointer(valueIndex)] = types.DefID(rt.stackValueString(keyIndex))
-		})
-	})
-}
-
-func (rt *runtime) parentDefIDFromValue(index int) types.Option[types.DefID] {
+func (rt *runtime) parentDefIDFromValue(index int) Option[DefID] {
 	if rt.L.Type(index) != lua.LUA_TTABLE {
-		return types.None[types.DefID]()
+		return None[DefID]()
 	}
-	if defID, ok := rt.defTableIDs[rt.L.ToPointer(index)]; ok {
-		return types.Some(defID)
+	if defID, ok := rt.defTableIDs.Get(rt.L.ToPointer(index)); ok {
+		return Some(defID)
 	}
-	return types.None[types.DefID]()
+	return None[DefID]()
 }
 
 func (rt *runtime) withGlobal(name string, fn func()) {
@@ -948,6 +964,18 @@ func (rt *runtime) absIndex(index int) int {
 		return index
 	}
 	return rt.L.GetTop() + index + 1
+}
+
+func (rt *runtime) beginTraversal() *collections.HashSet[uintptr] {
+	return rt.traversal.reset()
+}
+
+func (rt *runtime) currentScriptSource() (ScriptPath, bool) {
+	if len(rt.scriptStack) == 0 {
+		return "", false
+	}
+
+	return rt.scriptStack[len(rt.scriptStack)-1], true
 }
 
 func (rt *runtime) setGlobalFunction(name string, fn lua.LuaGoFunction) {
@@ -1009,25 +1037,25 @@ func (rt *runtime) luaNumericValue(index int) (float64, bool, bool) {
 	}
 }
 
-func (rt *runtime) worldDefFields(id types.DefID) (luavalue.Object, bool) {
+func (rt *runtime) worldDefFields(id DefID) (LuaObject, bool) {
 	rt.L.GetGlobal("Def")
 	defer rt.L.Pop(1)
 
 	if rt.L.Type(-1) != lua.LUA_TTABLE {
-		return luavalue.Object{}, false
+		return LuaObject{}, false
 	}
 
 	rt.L.GetField(-1, id.String())
 	defer rt.L.Pop(1)
 
 	if rt.L.Type(-1) != lua.LUA_TTABLE {
-		return luavalue.Object{}, false
+		return LuaObject{}, false
 	}
 
-	return rt.tableToObject(-1, map[uintptr]bool{}), true
+	return rt.tableToObject(-1, rt.beginTraversal()), true
 }
 
-func boolFieldFromObject(object luavalue.Object, key string) bool {
+func boolFieldFromObject(object LuaObject, key string) bool {
 	value, ok := object.Get(key)
 	if !ok {
 		return false

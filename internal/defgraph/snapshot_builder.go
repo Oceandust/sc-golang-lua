@@ -1,4 +1,4 @@
-package snapshot
+package defgraph
 
 import (
 	"fmt"
@@ -6,30 +6,27 @@ import (
 	"strconv"
 	"strings"
 
-	"defgraph/internal/luavalue"
-	"defgraph/internal/types"
-
 	"github.com/emirpasic/gods/sets/linkedhashset"
 )
 
 type resolvedDef struct {
-	ID             types.DefID
-	SourceFile     types.ScriptPath
-	LocalFields    luavalue.Object
-	ResolvedFields luavalue.Object
-	InheritParent  types.Option[types.DefID]
-	InheritChain   []types.DefID
-	Kind           types.RecordKind
+	ID             DefID
+	SourceFile     ScriptPath
+	LocalFields    LuaObject
+	ResolvedFields LuaObject
+	InheritParent  Option[DefID]
+	InheritChain   []DefID
+	Kind           RecordKind
 }
 
 type resolver struct {
-	world     *types.World
-	resolved  map[types.DefID]resolvedDef
-	resolving map[types.DefID]struct{}
+	world     *World
+	resolved  map[DefID]resolvedDef
+	resolving map[DefID]struct{}
 }
 
-func Build(world *types.World) (*types.Snapshot, error) {
-	ids := make([]types.DefID, 0, len(world.Defs))
+func BuildSnapshot(world *World) (*Snapshot, error) {
+	ids := make([]DefID, 0, len(world.Defs))
 	for id := range world.Defs {
 		ids = append(ids, id)
 	}
@@ -37,8 +34,8 @@ func Build(world *types.World) (*types.Snapshot, error) {
 
 	resolver := resolver{
 		world:     world,
-		resolved:  make(map[types.DefID]resolvedDef, len(ids)),
-		resolving: make(map[types.DefID]struct{}, len(ids)),
+		resolved:  make(map[DefID]resolvedDef, len(ids)),
+		resolving: make(map[DefID]struct{}, len(ids)),
 	}
 
 	defs := make([]resolvedDef, 0, len(ids))
@@ -50,16 +47,16 @@ func Build(world *types.World) (*types.Snapshot, error) {
 		defs = append(defs, item)
 	}
 
-	defRecords := make([]types.DefRecord, 0, len(defs))
+	defRecords := make([]DefRecord, 0, len(defs))
 	for _, item := range defs {
-		defRecords = append(defRecords, types.DefRecord{
+		defRecords = append(defRecords, DefRecord{
 			ID:             item.ID,
 			Kind:           item.Kind,
 			SourceFile:     item.SourceFile,
 			InheritParent:  item.InheritParent,
-			InheritChain:   append([]types.DefID(nil), item.InheritChain...),
-			LocalFields:    item.LocalFields.Clone(),
-			ResolvedFields: item.ResolvedFields.Clone(),
+			InheritChain:   append([]DefID(nil), item.InheritChain...),
+			LocalFields:    item.LocalFields,
+			ResolvedFields: item.ResolvedFields,
 		})
 	}
 
@@ -69,15 +66,15 @@ func Build(world *types.World) (*types.Snapshot, error) {
 	resources := buildResources(world, defs)
 	modules := buildModules(world, defs, ships, blueprintRecipes)
 
-	return &types.Snapshot{
-		Meta: types.Meta{
-			SchemaVersion: types.SchemaVersionV1,
+	return &Snapshot{
+		Meta: Meta{
+			SchemaVersion: SchemaVersionV1,
 			Loader:        world.Loader,
 			LoaderRuntime: world.LoaderRuntime,
 			RepoRoot:      world.RepoRoot,
 			CompiledRoot:  world.CompiledRoot,
-			LoadOrder:     append([]types.ScriptPath(nil), world.FilesLoaded...),
-			LoadedFiles:   append([]types.ScriptPath(nil), world.FilesLoaded...),
+			LoadOrder:     append([]ScriptPath(nil), world.FilesLoaded...),
+			LoadedFiles:   append([]ScriptPath(nil), world.FilesLoaded...),
 		},
 		Defs:          defRecords,
 		Ships:         ships,
@@ -90,7 +87,7 @@ func Build(world *types.World) (*types.Snapshot, error) {
 	}, nil
 }
 
-func (resolver *resolver) resolve(id types.DefID) (resolvedDef, error) {
+func (resolver *resolver) resolve(id DefID) (resolvedDef, error) {
 	if value, ok := resolver.resolved[id]; ok {
 		return value, nil
 	}
@@ -107,8 +104,9 @@ func (resolver *resolver) resolve(id types.DefID) (resolvedDef, error) {
 	resolver.resolving[id] = struct{}{}
 	defer delete(resolver.resolving, id)
 
-	resolvedFields := luavalue.NewObject()
-	inheritChain := make([]types.DefID, 0, 4)
+	resolvedFields := NewLuaObject()
+	inheritChain := make([]DefID, 0, 4)
+	hasParent := false
 
 	if parentID, ok := raw.InheritParent.Get(); ok {
 		if _, exists := resolver.world.Defs[parentID]; exists {
@@ -117,7 +115,8 @@ func (resolver *resolver) resolve(id types.DefID) (resolvedDef, error) {
 				return resolvedDef{}, err
 			}
 
-			resolvedFields = parentResolved.ResolvedFields.Clone()
+			resolvedFields = parentResolved.ResolvedFields
+			hasParent = true
 
 			chainSet := linkedhashset.New()
 			chainSet.Add(parentID)
@@ -126,17 +125,21 @@ func (resolver *resolver) resolve(id types.DefID) (resolvedDef, error) {
 			}
 
 			for _, rawValue := range chainSet.Values() {
-				inheritChain = append(inheritChain, rawValue.(types.DefID))
+				inheritChain = append(inheritChain, rawValue.(DefID))
 			}
 		}
 	}
 
-	resolvedFields = mergeObjects(resolvedFields, raw.LocalFields)
+	if hasParent {
+		resolvedFields = mergeObjects(resolvedFields, raw.LocalFields)
+	} else {
+		resolvedFields = pruneDontInherit(raw.LocalFields)
+	}
 
 	value := resolvedDef{
 		ID:             raw.ID,
 		SourceFile:     raw.SourceFile,
-		LocalFields:    raw.LocalFields.Clone(),
+		LocalFields:    raw.LocalFields,
 		ResolvedFields: resolvedFields,
 		InheritParent:  raw.InheritParent,
 		InheritChain:   inheritChain,
@@ -147,36 +150,36 @@ func (resolver *resolver) resolve(id types.DefID) (resolvedDef, error) {
 	return value, nil
 }
 
-func classifyDef(fields luavalue.Object) types.RecordKind {
+func classifyDef(fields LuaObject) RecordKind {
 	if boolField(fields, "is_blueprint") {
-		return types.RecordKindBlueprint
+		return RecordKindBlueprint
 	}
 
 	if boolField(fields, "is_resource") {
-		return types.RecordKindResource
+		return RecordKindResource
 	}
 
 	if fieldString(fields, "class").OrElse("") == "SpaceShip" {
-		return types.RecordKindShip
+		return RecordKindShip
 	}
 
 	if fields.MustGet("module_type").IsNull() && fields.MustGet("weapon_class").IsNull() {
 		className := fieldString(fields, "class").OrElse("")
 		switch className {
 		case "SpaceShipModule", "EngineModule", "ActiveModule":
-			return types.RecordKindModule
+			return RecordKindModule
 		default:
-			return types.RecordKindOther
+			return RecordKindOther
 		}
 	}
 
-	return types.RecordKindModule
+	return RecordKindModule
 }
 
-func buildShips(world *types.World, defs []resolvedDef) []types.ShipRecord {
-	records := make([]types.ShipRecord, 0)
+func buildShips(world *World, defs []resolvedDef) []ShipRecord {
+	records := make([]ShipRecord, 0)
 	for _, item := range defs {
-		if item.Kind != types.RecordKindShip {
+		if item.Kind != RecordKindShip {
 			continue
 		}
 
@@ -190,29 +193,29 @@ func buildShips(world *types.World, defs []resolvedDef) []types.ShipRecord {
 			continue
 		}
 
-		records = append(records, types.ShipRecord{
-			ID:            types.ShipID(item.ID),
+		records = append(records, ShipRecord{
+			ID:            ShipID(item.ID),
 			SourceFile:    item.SourceFile,
 			InheritParent: item.InheritParent,
-			InheritChain:  append([]types.DefID(nil), item.InheritChain...),
+			InheritChain:  append([]DefID(nil), item.InheritChain...),
 			ShipName:      fieldString(item.ResolvedFields, "ship_name"),
 			ShipTier:      fieldInt64(item.ResolvedFields, "ship_tier"),
 			Rank:          fieldInt64(item.ResolvedFields, "rank"),
-			Role: mapOption(enumField(world.Enums.ShipRoles, item.ResolvedFields, "role"), func(value string) types.ShipRoleName {
-				return types.ShipRoleName(value)
+			Role: mapOption(enumField(world.Enums.ShipRoles, item.ResolvedFields, "role"), func(value string) ShipRoleName {
+				return ShipRoleName(value)
 			}),
-			ShipClass: mapOption(enumField(world.Enums.ShipClass, item.ResolvedFields, "ship_class"), func(value string) types.ShipClassName {
-				return types.ShipClassName(value)
+			ShipClass: mapOption(enumField(world.Enums.ShipClass, item.ResolvedFields, "ship_class"), func(value string) ShipClassName {
+				return ShipClassName(value)
 			}),
-			Race: mapOption(enumField(world.Enums.Race, item.ResolvedFields, "race"), func(value string) types.RaceName {
-				return types.RaceName(value)
+			Race: mapOption(enumField(world.Enums.Race, item.ResolvedFields, "race"), func(value string) RaceName {
+				return RaceName(value)
 			}),
 			IsPremium:      boolField(item.ResolvedFields, "isPremium"),
 			DefaultModules: normalizeDefaultModules(item.ResolvedFields.MustGet("default_modules"), world.Enums.SpaceShipModuleSlot),
 			SlotTypes:      normalizeSlotTypes(item.ResolvedFields.MustGet("slot_module_types"), world.Enums.SpaceShipModuleSlot, world.Enums.ModuleType),
-			Economy: types.EconomyInfo{
+			Economy: EconomyInfo{
 				Purchase: purchaseFromFields(item.ResolvedFields),
-				Crafting: types.CraftingInfo{
+				Crafting: CraftingInfo{
 					DirectIngredients: normalizeIngredients(item.ResolvedFields.MustGet("craftable_reagents")),
 				},
 				RecraftCredits: fieldInt64(item.ResolvedFields, "recraft_credits"),
@@ -227,12 +230,12 @@ func buildShips(world *types.World, defs []resolvedDef) []types.ShipRecord {
 	return records
 }
 
-func buildBlueprints(defs []resolvedDef, ships []types.ShipRecord) []types.BlueprintRecord {
+func buildBlueprints(defs []resolvedDef, ships []ShipRecord) []BlueprintRecord {
 	shipIndex := makeShipIndex(ships)
-	records := make([]types.BlueprintRecord, 0)
+	records := make([]BlueprintRecord, 0)
 
 	for _, item := range defs {
-		if item.Kind != types.RecordKindBlueprint {
+		if item.Kind != RecordKindBlueprint {
 			continue
 		}
 
@@ -242,10 +245,10 @@ func buildBlueprints(defs []resolvedDef, ships []types.ShipRecord) []types.Bluep
 		}
 
 		requiredShipRaw := normalizeShipIDs(item.ResolvedFields.MustGet("required_ship"))
-		records = append(records, types.BlueprintRecord{
-			ID:               types.BlueprintID(item.ID),
+		records = append(records, BlueprintRecord{
+			ID:               BlueprintID(item.ID),
 			SourceFile:       item.SourceFile,
-			CraftResult:      types.DefID(craftResult),
+			CraftResult:      DefID(craftResult),
 			CraftResultCount: fieldInt64(item.ResolvedFields, "craft_result_count").OrElse(1),
 			Acquisition:      purchaseFromFields(item.ResolvedFields),
 			Ingredients:      normalizeIngredients(item.ResolvedFields.MustGet("craft_ingredients")),
@@ -262,20 +265,20 @@ func buildBlueprints(defs []resolvedDef, ships []types.ShipRecord) []types.Bluep
 	return records
 }
 
-func buildResources(world *types.World, defs []resolvedDef) []types.ResourceRecord {
-	records := make([]types.ResourceRecord, 0)
+func buildResources(world *World, defs []resolvedDef) []ResourceRecord {
+	records := make([]ResourceRecord, 0)
 	for _, item := range defs {
-		if item.Kind != types.RecordKindResource {
+		if item.Kind != RecordKindResource {
 			continue
 		}
 
-		records = append(records, types.ResourceRecord{
+		records = append(records, ResourceRecord{
 			ID:         item.ID,
 			SourceFile: item.SourceFile,
-			ItemSubtype: mapOption(enumField(world.Enums.ItemSubtype, item.ResolvedFields, "item_subtype"), func(value string) types.ItemSubtypeName {
-				return types.ItemSubtypeName(value)
+			ItemSubtype: mapOption(enumField(world.Enums.ItemSubtype, item.ResolvedFields, "item_subtype"), func(value string) ItemSubtypeName {
+				return ItemSubtypeName(value)
 			}),
-			Economy: types.EconomyInfo{
+			Economy: EconomyInfo{
 				Purchase: purchaseFromFields(item.ResolvedFields),
 			},
 		})
@@ -288,44 +291,44 @@ func buildResources(world *types.World, defs []resolvedDef) []types.ResourceReco
 	return records
 }
 
-func buildModules(world *types.World, defs []resolvedDef, ships []types.ShipRecord, blueprintRecipes map[types.DefID][]types.BlueprintRecord) []types.ModuleRecord {
+func buildModules(world *World, defs []resolvedDef, ships []ShipRecord, blueprintRecipes map[DefID][]BlueprintRecord) []ModuleRecord {
 	shipIndex := makeShipIndex(ships)
-	records := make([]types.ModuleRecord, 0)
+	records := make([]ModuleRecord, 0)
 
 	for _, item := range defs {
-		if item.Kind != types.RecordKindModule {
+		if item.Kind != RecordKindModule {
 			continue
 		}
 		if boolField(item.ResolvedFields, "cant_be_equipped") {
 			continue
 		}
-		if item.ID == types.DefID("SpaceShipModule") {
+		if item.ID == DefID("SpaceShipModule") {
 			continue
 		}
 
 		requiredShipRaw := normalizeShipIDs(world.PreUpgradeRequiredShip[item.ID])
 		requiredShipResolved := normalizeShipIDs(item.ResolvedFields.MustGet("required_ship"))
 
-		records = append(records, types.ModuleRecord{
+		records = append(records, ModuleRecord{
 			ID:            item.ID,
 			SourceFile:    item.SourceFile,
 			InheritParent: item.InheritParent,
-			InheritChain:  append([]types.DefID(nil), item.InheritChain...),
-			ModuleType: mapOption(enumField(world.Enums.ModuleType, item.ResolvedFields, "module_type"), func(value string) types.ModuleTypeName {
-				return types.ModuleTypeName(value)
+			InheritChain:  append([]DefID(nil), item.InheritChain...),
+			ModuleType: mapOption(enumField(world.Enums.ModuleType, item.ResolvedFields, "module_type"), func(value string) ModuleTypeName {
+				return ModuleTypeName(value)
 			}),
-			ItemSubtype: mapOption(enumField(world.Enums.ItemSubtype, item.ResolvedFields, "item_subtype"), func(value string) types.ItemSubtypeName {
-				return types.ItemSubtypeName(value)
+			ItemSubtype: mapOption(enumField(world.Enums.ItemSubtype, item.ResolvedFields, "item_subtype"), func(value string) ItemSubtypeName {
+				return ItemSubtypeName(value)
 			}),
 			Tier:        fieldInt64(item.ResolvedFields, "tier"),
 			Mark:        fieldInt64(item.ResolvedFields, "mark"),
 			VariantKind: detectVariantKind(item.ID, item.ResolvedFields),
-			WeaponClass: mapOption(enumField(world.Enums.WeaponClass, item.ResolvedFields, "weapon_class"), func(value string) types.WeaponClassName {
-				return types.WeaponClassName(value)
+			WeaponClass: mapOption(enumField(world.Enums.WeaponClass, item.ResolvedFields, "weapon_class"), func(value string) WeaponClassName {
+				return WeaponClassName(value)
 			}),
-			Constraints: types.Constraints{
-				RequiredRole: mapOption(enumField(world.Enums.ShipRoles, item.ResolvedFields, "required_role"), func(value string) types.ShipRoleName {
-					return types.ShipRoleName(value)
+			Constraints: Constraints{
+				RequiredRole: mapOption(enumField(world.Enums.ShipRoles, item.ResolvedFields, "required_role"), func(value string) ShipRoleName {
+					return ShipRoleName(value)
 				}),
 				ClassMask:            maskValue(world.Enums.ShipClass, item.ResolvedFields.MustGet("class_mask")),
 				RaceMask:             maskValue(world.Enums.RaceMask, item.ResolvedFields.MustGet("race_mask")),
@@ -335,14 +338,14 @@ func buildModules(world *types.World, defs []resolvedDef, ships []types.ShipReco
 				RequiredShipResolved: requiredShipResolved,
 			},
 			AllowedShipIDs: computeAllowedShips(world, shipIndex, item.ResolvedFields, requiredShipResolved),
-			Upgrade: types.UpgradeInfo{
-				Prev:  mapOption(fieldString(item.ResolvedFields, "prev_upgrade"), func(value string) types.DefID { return types.DefID(value) }),
-				Next:  mapOption(fieldString(item.ResolvedFields, "next_upgrade"), func(value string) types.DefID { return types.DefID(value) }),
+			Upgrade: UpgradeInfo{
+				Prev:  mapOption(fieldString(item.ResolvedFields, "prev_upgrade"), func(value string) DefID { return DefID(value) }),
+				Next:  mapOption(fieldString(item.ResolvedFields, "next_upgrade"), func(value string) DefID { return DefID(value) }),
 				Level: fieldInt64(item.ResolvedFields, "current_upgrade_level"),
 			},
-			Economy: types.EconomyInfo{
+			Economy: EconomyInfo{
 				Purchase: purchaseFromFields(item.ResolvedFields),
-				Crafting: types.CraftingInfo{
+				Crafting: CraftingInfo{
 					Recipes: toRecipes(blueprintRecipes[item.ID]),
 				},
 			},
@@ -356,8 +359,8 @@ func buildModules(world *types.World, defs []resolvedDef, ships []types.ShipReco
 	return records
 }
 
-func buildUpgradeChains(modules []types.ModuleRecord) []types.UpgradeChain {
-	groups := map[string][]types.ModuleRecord{}
+func buildUpgradeChains(modules []ModuleRecord) []UpgradeChain {
+	groups := map[string][]ModuleRecord{}
 	for _, item := range modules {
 		subtype, ok := item.ItemSubtype.Get()
 		if !ok {
@@ -379,7 +382,7 @@ func buildUpgradeChains(modules []types.ModuleRecord) []types.UpgradeChain {
 	}
 	sort.Strings(keys)
 
-	chains := make([]types.UpgradeChain, 0, len(keys))
+	chains := make([]UpgradeChain, 0, len(keys))
 	for _, key := range keys {
 		items := groups[key]
 		sort.Slice(items, func(left int, right int) bool {
@@ -394,12 +397,12 @@ func buildUpgradeChains(modules []types.ModuleRecord) []types.UpgradeChain {
 		subtype, _ := items[0].ItemSubtype.Get()
 		tier, _ := items[0].Tier.Get()
 
-		ids := make([]types.DefID, 0, len(items))
+		ids := make([]DefID, 0, len(items))
 		for _, item := range items {
 			ids = append(ids, item.ID)
 		}
 
-		chains = append(chains, types.UpgradeChain{
+		chains = append(chains, UpgradeChain{
 			ItemSubtype: subtype,
 			Tier:        tier,
 			Items:       ids,
@@ -409,9 +412,9 @@ func buildUpgradeChains(modules []types.ModuleRecord) []types.UpgradeChain {
 	return chains
 }
 
-func buildCompatibility(modules []types.ModuleRecord, ships []types.ShipRecord) types.CompatibilityIndex {
-	moduleSets := make(map[types.DefID]*linkedhashset.Set, len(modules))
-	shipSets := make(map[types.ShipID]*linkedhashset.Set, len(ships))
+func buildCompatibility(modules []ModuleRecord, ships []ShipRecord) CompatibilityIndex {
+	moduleSets := make(map[DefID]*linkedhashset.Set, len(modules))
+	shipSets := make(map[ShipID]*linkedhashset.Set, len(ships))
 
 	for _, ship := range ships {
 		shipSets[ship.ID] = linkedhashset.New()
@@ -432,103 +435,64 @@ func buildCompatibility(modules []types.ModuleRecord, ships []types.ShipRecord) 
 		moduleSets[module.ID] = moduleSet
 	}
 
-	moduleToShips := make(map[types.DefID][]types.ShipID, len(moduleSets))
+	moduleToShips := make(map[DefID][]ShipID, len(moduleSets))
 	for moduleID, set := range moduleSets {
 		moduleToShips[moduleID] = canonicalizeShipIDSet(set)
 	}
 
-	shipToModules := make(map[types.ShipID][]types.DefID, len(shipSets))
+	shipToModules := make(map[ShipID][]DefID, len(shipSets))
 	for shipID, set := range shipSets {
 		shipToModules[shipID] = canonicalizeDefIDSet(set)
 	}
 
-	return types.CompatibilityIndex{
+	return CompatibilityIndex{
 		ModuleToShips: moduleToShips,
 		ShipToModules: shipToModules,
 	}
 }
 
-func mergeObjects(parent luavalue.Object, child luavalue.Object) luavalue.Object {
-	out := parent.Clone()
-	child.Range(func(key string, value luavalue.Value) bool {
-		if isDontInherit(value) {
-			out.Delete(key)
-			return true
-		}
-
-		childObject, childIsObject := value.AsObject()
-		parentValue, hasParent := out.Get(key)
-		parentObject, parentIsObject := parentValue.AsObject()
-
-		switch {
-		case childIsObject && hasParent && parentIsObject:
-			out.Set(key, luavalue.ObjectValue(mergeObjects(parentObject, childObject)))
-		case childIsObject:
-			out.Set(key, luavalue.ObjectValue(pruneDontInherit(childObject)))
-		default:
-			out.Set(key, value.Clone())
-		}
-
-		return true
-	})
-
-	return out
+func mergeObjects(parent LuaObject, child LuaObject) LuaObject {
+	return MergeLuaObjects(parent, child, isDontInherit)
 }
 
-func pruneDontInherit(object luavalue.Object) luavalue.Object {
-	out := luavalue.NewObject()
-	object.Range(func(key string, value luavalue.Value) bool {
-		if isDontInherit(value) {
-			return true
-		}
-
-		nested, ok := value.AsObject()
-		if ok {
-			out.Set(key, luavalue.ObjectValue(pruneDontInherit(nested)))
-			return true
-		}
-
-		out.Set(key, value.Clone())
-		return true
-	})
-
-	return out
+func pruneDontInherit(object LuaObject) LuaObject {
+	return PruneLuaObject(object, isDontInherit)
 }
 
-func isDontInherit(value luavalue.Value) bool {
+func isDontInherit(value LuaValue) bool {
 	text, ok := value.AsString()
-	return ok && text == types.DontInheritSentinel
+	return ok && text == DontInheritSentinel
 }
 
-func fieldString(object luavalue.Object, key string) types.Option[string] {
+func fieldString(object LuaObject, key string) Option[string] {
 	value, ok := object.Get(key)
 	if !ok {
-		return types.None[string]()
+		return None[string]()
 	}
 
 	text, ok := value.AsString()
 	if !ok {
-		return types.None[string]()
+		return None[string]()
 	}
 
-	return types.Some(text)
+	return Some(text)
 }
 
-func fieldInt64(object luavalue.Object, key string) types.Option[int64] {
+func fieldInt64(object LuaObject, key string) Option[int64] {
 	value, ok := object.Get(key)
 	if !ok {
-		return types.None[int64]()
+		return None[int64]()
 	}
 
 	number, ok := value.AsInt64()
 	if !ok {
-		return types.None[int64]()
+		return None[int64]()
 	}
 
-	return types.Some(number)
+	return Some(number)
 }
 
-func boolField(object luavalue.Object, key string) bool {
+func boolField(object LuaObject, key string) bool {
 	value, ok := object.Get(key)
 	if !ok {
 		return false
@@ -538,76 +502,76 @@ func boolField(object luavalue.Object, key string) bool {
 	return ok && result
 }
 
-func enumField(enum types.EnumTable, object luavalue.Object, key string) types.Option[string] {
+func enumField(enum EnumTable, object LuaObject, key string) Option[string] {
 	value, ok := object.Get(key)
 	if !ok {
-		return types.None[string]()
+		return None[string]()
 	}
 
 	number, ok := value.AsInt64()
 	if !ok {
-		return types.None[string]()
+		return None[string]()
 	}
 
 	return enum.NameOf(number)
 }
 
-func mapOption[T any, U any](value types.Option[T], mapper func(T) U) types.Option[U] {
+func mapOption[T any, U any](value Option[T], mapper func(T) U) Option[U] {
 	raw, ok := value.Get()
 	if !ok {
-		return types.None[U]()
+		return None[U]()
 	}
 
-	return types.Some(mapper(raw))
+	return Some(mapper(raw))
 }
 
-func maskValue(enum types.EnumTable, value luavalue.Value) types.Option[types.MaskValue] {
+func maskValue(enum EnumTable, value LuaValue) Option[MaskValue] {
 	number, ok := value.AsInt64()
 	if !ok {
-		return types.None[types.MaskValue]()
+		return None[MaskValue]()
 	}
 
-	return types.Some(types.MaskValue{
+	return Some(MaskValue{
 		Raw:   number,
 		Flags: enum.FlagsOf(number),
 	})
 }
 
-func detectVariantKind(id types.DefID, fields luavalue.Object) types.Option[types.VariantKind] {
+func detectVariantKind(id DefID, fields LuaObject) Option[VariantKind] {
 	switch {
 	case strings.HasSuffix(id.String(), "_Mk1"):
-		return types.Some(types.VariantKindMk1)
+		return Some(VariantKindMk1)
 	case strings.HasSuffix(id.String(), "_Rare"):
-		return types.Some(types.VariantKindRare)
+		return Some(VariantKindRare)
 	case strings.HasSuffix(id.String(), "_Mk3"):
-		return types.Some(types.VariantKindMk3)
+		return Some(VariantKindMk3)
 	case strings.HasSuffix(id.String(), "_Epic"):
-		return types.Some(types.VariantKindEpic)
+		return Some(VariantKindEpic)
 	case strings.HasSuffix(id.String(), "_Rel"):
-		return types.Some(types.VariantKindRelic)
+		return Some(VariantKindRelic)
 	case strings.HasSuffix(id.String(), "_Prem"):
-		return types.Some(types.VariantKindPremium)
+		return Some(VariantKindPremium)
 	case strings.HasSuffix(id.String(), "_Tournament"):
-		return types.Some(types.VariantKindTournament)
+		return Some(VariantKindTournament)
 	}
 
 	switch fieldInt64(fields, "mark").OrElse(0) {
 	case 1:
-		return types.Some(types.VariantKindMk1)
+		return Some(VariantKindMk1)
 	case 3:
-		return types.Some(types.VariantKindMk3)
+		return Some(VariantKindMk3)
 	case 5:
-		return types.Some(types.VariantKindRelic)
+		return Some(VariantKindRelic)
 	case 6:
-		return types.Some(types.VariantKindRare)
+		return Some(VariantKindRare)
 	case 7:
-		return types.Some(types.VariantKindEpic)
+		return Some(VariantKindEpic)
 	default:
-		return types.None[types.VariantKind]()
+		return None[VariantKind]()
 	}
 }
 
-func normalizeStringList(value luavalue.Value) []string {
+func normalizeStringList(value LuaValue) []string {
 	if value.IsNull() {
 		return nil
 	}
@@ -624,7 +588,7 @@ func normalizeStringList(value luavalue.Value) []string {
 				values = append(values, text)
 			}
 		}
-		return types.CanonicalizeStrings(values)
+		return CanonicalizeStrings(values)
 	}
 
 	object, ok := value.AsObject()
@@ -633,7 +597,7 @@ func normalizeStringList(value luavalue.Value) []string {
 	}
 
 	keys := object.Keys()
-	types.SortNumericStrings(keys)
+	SortNumericStrings(keys)
 
 	values := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -643,28 +607,28 @@ func normalizeStringList(value luavalue.Value) []string {
 		}
 	}
 
-	return types.CanonicalizeStrings(values)
+	return CanonicalizeStrings(values)
 }
 
-func normalizeShipIDs(value luavalue.Value) []types.ShipID {
+func normalizeShipIDs(value LuaValue) []ShipID {
 	raw := normalizeStringList(value)
-	ids := make([]types.ShipID, 0, len(raw))
+	ids := make([]ShipID, 0, len(raw))
 	for _, item := range raw {
-		ids = append(ids, types.ShipID(item))
+		ids = append(ids, ShipID(item))
 	}
 	return ids
 }
 
-func normalizeIngredients(value luavalue.Value) []types.CraftIngredient {
+func normalizeIngredients(value LuaValue) []CraftIngredient {
 	object, ok := value.AsObject()
 	if !ok {
 		return nil
 	}
 
 	keys := object.Keys()
-	types.SortNumericStrings(keys)
+	SortNumericStrings(keys)
 
-	ingredients := make([]types.CraftIngredient, 0, len(keys))
+	ingredients := make([]CraftIngredient, 0, len(keys))
 	for _, key := range keys {
 		entry, ok := object.MustGet(key).AsObject()
 		if !ok {
@@ -677,8 +641,8 @@ func normalizeIngredients(value luavalue.Value) []types.CraftIngredient {
 		}
 
 		if defID, ok := fieldString(entry, "def").Get(); ok {
-			ingredients = append(ingredients, types.CraftIngredient{
-				Kind:   types.CraftIngredientKindItem,
+			ingredients = append(ingredients, CraftIngredient{
+				Kind:   CraftIngredientKindItem,
 				ID:     defID,
 				Amount: amount,
 			})
@@ -686,8 +650,8 @@ func normalizeIngredients(value luavalue.Value) []types.CraftIngredient {
 		}
 
 		if resourceID, ok := fieldString(entry, "resource").Get(); ok {
-			ingredients = append(ingredients, types.CraftIngredient{
-				Kind:   types.CraftIngredientKindResource,
+			ingredients = append(ingredients, CraftIngredient{
+				Kind:   CraftIngredientKindResource,
 				ID:     resourceID,
 				Amount: amount,
 			})
@@ -695,8 +659,8 @@ func normalizeIngredients(value luavalue.Value) []types.CraftIngredient {
 		}
 
 		if currencyID, ok := fieldString(entry, "currency").Get(); ok {
-			ingredients = append(ingredients, types.CraftIngredient{
-				Kind:   types.CraftIngredientKindCurrency,
+			ingredients = append(ingredients, CraftIngredient{
+				Kind:   CraftIngredientKindCurrency,
 				ID:     currencyID,
 				Amount: amount,
 			})
@@ -706,8 +670,8 @@ func normalizeIngredients(value luavalue.Value) []types.CraftIngredient {
 	return ingredients
 }
 
-func purchaseFromFields(fields luavalue.Object) types.PurchaseInfo {
-	return types.PurchaseInfo{
+func purchaseFromFields(fields LuaObject) PurchaseInfo {
+	return PurchaseInfo{
 		Price:           fieldInt64(fields, "price"),
 		PremiumPrice:    fieldInt64(fields, "premiumPrice"),
 		TokenPrice:      fieldInt64(fields, "tokenPrice"),
@@ -718,23 +682,23 @@ func purchaseFromFields(fields luavalue.Object) types.PurchaseInfo {
 	}
 }
 
-func normalizeDefaultModules(value luavalue.Value, slots types.EnumTable) map[string]types.DefID {
+func normalizeDefaultModules(value LuaValue, slots EnumTable) map[string]DefID {
 	object, ok := value.AsObject()
 	if !ok {
 		return nil
 	}
 
 	keys := object.Keys()
-	types.SortNumericStrings(keys)
+	SortNumericStrings(keys)
 
-	out := make(map[string]types.DefID, len(keys))
+	out := make(map[string]DefID, len(keys))
 	for _, key := range keys {
 		slotName := slotNameForKey(slots, key)
 		moduleID, ok := object.MustGet(key).AsString()
 		if !ok {
 			continue
 		}
-		out[slotName] = types.DefID(moduleID)
+		out[slotName] = DefID(moduleID)
 	}
 
 	if len(out) == 0 {
@@ -744,21 +708,21 @@ func normalizeDefaultModules(value luavalue.Value, slots types.EnumTable) map[st
 	return out
 }
 
-func normalizeSlotTypes(value luavalue.Value, slots types.EnumTable, moduleTypes types.EnumTable) map[string]types.ModuleTypeName {
+func normalizeSlotTypes(value LuaValue, slots EnumTable, moduleTypes EnumTable) map[string]ModuleTypeName {
 	object, ok := value.AsObject()
 	if !ok {
 		return nil
 	}
 
 	keys := object.Keys()
-	types.SortNumericStrings(keys)
+	SortNumericStrings(keys)
 
-	out := make(map[string]types.ModuleTypeName, len(keys))
+	out := make(map[string]ModuleTypeName, len(keys))
 	for _, key := range keys {
 		slotName := slotNameForKey(slots, key)
 		entry := object.MustGet(key)
 		if raw, ok := entry.AsString(); ok {
-			out[slotName] = types.ModuleTypeName(raw)
+			out[slotName] = ModuleTypeName(raw)
 			continue
 		}
 
@@ -769,11 +733,11 @@ func normalizeSlotTypes(value luavalue.Value, slots types.EnumTable, moduleTypes
 
 		name, ok := moduleTypes.NameOf(number).Get()
 		if !ok {
-			out[slotName] = types.ModuleTypeName(strconv.FormatInt(number, 10))
+			out[slotName] = ModuleTypeName(strconv.FormatInt(number, 10))
 			continue
 		}
 
-		out[slotName] = types.ModuleTypeName(name)
+		out[slotName] = ModuleTypeName(name)
 	}
 
 	if len(out) == 0 {
@@ -783,7 +747,7 @@ func normalizeSlotTypes(value luavalue.Value, slots types.EnumTable, moduleTypes
 	return out
 }
 
-func slotNameForKey(slots types.EnumTable, key string) string {
+func slotNameForKey(slots EnumTable, key string) string {
 	slotNumber, err := strconv.ParseInt(key, 10, 64)
 	if err != nil {
 		return key
@@ -797,16 +761,16 @@ func slotNameForKey(slots types.EnumTable, key string) string {
 	return name
 }
 
-func toRecipes(items []types.BlueprintRecord) []types.Recipe {
-	recipes := make([]types.Recipe, 0, len(items))
+func toRecipes(items []BlueprintRecord) []Recipe {
+	recipes := make([]Recipe, 0, len(items))
 	for _, item := range items {
-		recipes = append(recipes, types.Recipe{
+		recipes = append(recipes, Recipe{
 			BlueprintID:      item.ID,
 			Acquisition:      item.Acquisition,
-			Ingredients:      append([]types.CraftIngredient(nil), item.Ingredients...),
+			Ingredients:      append([]CraftIngredient(nil), item.Ingredients...),
 			CraftResultCount: item.CraftResultCount,
-			RequiredShipRaw:  append([]types.ShipID(nil), item.RequiredShipRaw...),
-			AllowedShipIDs:   append([]types.ShipID(nil), item.AllowedShipIDs...),
+			RequiredShipRaw:  append([]ShipID(nil), item.RequiredShipRaw...),
+			AllowedShipIDs:   append([]ShipID(nil), item.AllowedShipIDs...),
 			RequiredNode:     item.RequiredNode,
 		})
 	}
@@ -818,23 +782,23 @@ func toRecipes(items []types.BlueprintRecord) []types.Recipe {
 	return recipes
 }
 
-func makeShipIndex(ships []types.ShipRecord) map[types.ShipID]types.ShipRecord {
-	index := make(map[types.ShipID]types.ShipRecord, len(ships))
+func makeShipIndex(ships []ShipRecord) map[ShipID]ShipRecord {
+	index := make(map[ShipID]ShipRecord, len(ships))
 	for _, ship := range ships {
 		index[ship.ID] = ship
 	}
 	return index
 }
 
-func groupBlueprintsByCraftResult(items []types.BlueprintRecord) map[types.DefID][]types.BlueprintRecord {
-	out := make(map[types.DefID][]types.BlueprintRecord, len(items))
+func groupBlueprintsByCraftResult(items []BlueprintRecord) map[DefID][]BlueprintRecord {
+	out := make(map[DefID][]BlueprintRecord, len(items))
 	for _, item := range items {
 		out[item.CraftResult] = append(out[item.CraftResult], item)
 	}
 	return out
 }
 
-func computeAllowedShips(world *types.World, shipIndex map[types.ShipID]types.ShipRecord, fields luavalue.Object, requiredShipResolved []types.ShipID) []types.ShipID {
+func computeAllowedShips(world *World, shipIndex map[ShipID]ShipRecord, fields LuaObject, requiredShipResolved []ShipID) []ShipID {
 	requiredSet := linkedhashset.New()
 	for _, shipID := range requiredShipResolved {
 		requiredSet.Add(shipID)
@@ -846,7 +810,7 @@ func computeAllowedShips(world *types.World, shipIndex map[types.ShipID]types.Sh
 	rankMin, hasRankMin := fieldInt64(fields, "rank_min").Get()
 	rankMax, hasRankMax := fieldInt64(fields, "rank_max").Get()
 
-	shipIDs := make([]types.ShipID, 0, len(shipIndex))
+	shipIDs := make([]ShipID, 0, len(shipIndex))
 	for shipID := range shipIndex {
 		shipIDs = append(shipIDs, shipID)
 	}
@@ -915,7 +879,7 @@ func computeAllowedShips(world *types.World, shipIndex map[types.ShipID]types.Sh
 	return canonicalizeShipIDSet(allowed)
 }
 
-func resolveShipIDs(values []types.ShipID, shipIndex map[types.ShipID]types.ShipRecord) []types.ShipID {
+func resolveShipIDs(values []ShipID, shipIndex map[ShipID]ShipRecord) []ShipID {
 	set := linkedhashset.New()
 	for _, shipID := range values {
 		if _, ok := shipIndex[shipID]; ok {
@@ -926,35 +890,35 @@ func resolveShipIDs(values []types.ShipID, shipIndex map[types.ShipID]types.Ship
 	return canonicalizeShipIDSet(set)
 }
 
-func canonicalizeShipIDSet(set *linkedhashset.Set) []types.ShipID {
+func canonicalizeShipIDSet(set *linkedhashset.Set) []ShipID {
 	raw := make([]string, 0, set.Size())
 	for _, item := range set.Values() {
-		raw = append(raw, string(item.(types.ShipID)))
+		raw = append(raw, string(item.(ShipID)))
 	}
 
-	raw = types.CanonicalizeStrings(raw)
-	ids := make([]types.ShipID, 0, len(raw))
+	raw = CanonicalizeStrings(raw)
+	ids := make([]ShipID, 0, len(raw))
 	for _, item := range raw {
-		ids = append(ids, types.ShipID(item))
+		ids = append(ids, ShipID(item))
 	}
 	return ids
 }
 
-func canonicalizeDefIDSet(set *linkedhashset.Set) []types.DefID {
+func canonicalizeDefIDSet(set *linkedhashset.Set) []DefID {
 	raw := make([]string, 0, set.Size())
 	for _, item := range set.Values() {
-		raw = append(raw, string(item.(types.DefID)))
+		raw = append(raw, string(item.(DefID)))
 	}
 
-	raw = types.CanonicalizeStrings(raw)
-	ids := make([]types.DefID, 0, len(raw))
+	raw = CanonicalizeStrings(raw)
+	ids := make([]DefID, 0, len(raw))
 	for _, item := range raw {
-		ids = append(ids, types.DefID(item))
+		ids = append(ids, DefID(item))
 	}
 	return ids
 }
 
-func chainSortWeight(item types.ModuleRecord) int64 {
+func chainSortWeight(item ModuleRecord) int64 {
 	if level, ok := item.Upgrade.Level.Get(); ok {
 		return level
 	}
@@ -965,26 +929,26 @@ func chainSortWeight(item types.ModuleRecord) int64 {
 	}
 
 	switch variant {
-	case types.VariantKindMk1:
+	case VariantKindMk1:
 		return 1
-	case types.VariantKindRare:
+	case VariantKindRare:
 		return 2
-	case types.VariantKindMk3:
+	case VariantKindMk3:
 		return 3
-	case types.VariantKindEpic:
+	case VariantKindEpic:
 		return 4
-	case types.VariantKindRelic:
+	case VariantKindRelic:
 		return 5
-	case types.VariantKindPremium:
+	case VariantKindPremium:
 		return 6
-	case types.VariantKindTournament:
+	case VariantKindTournament:
 		return 7
 	default:
 		return 999
 	}
 }
 
-func sortDefIDs(ids []types.DefID) {
+func sortDefIDs(ids []DefID) {
 	sort.Slice(ids, func(left int, right int) bool {
 		return ids[left] < ids[right]
 	})

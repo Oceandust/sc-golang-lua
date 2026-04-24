@@ -28,21 +28,26 @@ func rawDeflate(data []byte) ([]byte, error) {
 }
 
 func rawInflate(data []byte, expectedSize int) ([]byte, error) {
-	reader := flate.NewReader(bytes.NewReader(data))
-	defer func() {
-		_ = reader.Close()
-	}()
-
 	var buffer bytes.Buffer
 	if expectedSize > 0 {
 		buffer.Grow(expectedSize)
 	}
 
-	if _, err := io.Copy(&buffer, reader); err != nil {
+	if err := rawInflateToWriter(bytes.NewReader(data), &buffer); err != nil {
 		return nil, err
 	}
 
 	return buffer.Bytes(), nil
+}
+
+func rawInflateToWriter(source io.Reader, destination io.Writer) error {
+	reader := flate.NewReader(source)
+	defer func() {
+		_ = reader.Close()
+	}()
+
+	_, err := io.Copy(destination, reader)
+	return err
 }
 
 func xorFirstWord(data []byte, mask uint32) error {

@@ -44,6 +44,14 @@ func (mapValue *HashMap[K, V]) Delete(key K) {
 	mapValue.items.Remove(key)
 }
 
+func (mapValue *HashMap[K, V]) Clear() {
+	if mapValue == nil {
+		return
+	}
+	mapValue.ensure()
+	mapValue.items.Clear()
+}
+
 func (mapValue *HashMap[K, V]) Contains(key K) bool {
 	_, ok := mapValue.Get(key)
 	return ok
@@ -130,6 +138,14 @@ func (mapValue *OrderedMap[K, V]) Delete(key K) {
 	mapValue.items.Remove(key)
 }
 
+func (mapValue *OrderedMap[K, V]) Clear() {
+	if mapValue == nil {
+		return
+	}
+	mapValue.ensure()
+	mapValue.items.Clear()
+}
+
 func (mapValue *OrderedMap[K, V]) Len() int {
 	if mapValue == nil || mapValue.items == nil {
 		return 0
@@ -152,10 +168,9 @@ func (mapValue *OrderedMap[K, V]) Range(fn func(K, V) bool) {
 	if mapValue == nil || mapValue.items == nil {
 		return
 	}
-	for _, rawKey := range mapValue.items.Keys() {
-		key := rawKey.(K)
-		rawValue, _ := mapValue.items.Get(rawKey)
-		if !fn(key, rawValue.(V)) {
+	iterator := mapValue.items.Iterator()
+	for iterator.Next() {
+		if !fn(iterator.Key().(K), iterator.Value().(V)) {
 			return
 		}
 	}

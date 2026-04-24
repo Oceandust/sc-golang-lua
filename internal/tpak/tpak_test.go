@@ -2,9 +2,11 @@ package tpak
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +41,168 @@ func TestPackAndUnpackDirectoryRoundTrip(t *testing.T) {
 	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), filepath.Join(unpackRoot, "gamedata", "scripts", "a.lua"))
 	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), filepath.Join(unpackRoot, "gamedata", "textures", "alpha.txt"))
 	assertFileBytes(t, filepath.Join(inputRoot, "ui", "layout", "menu.json"), filepath.Join(unpackRoot, "ui", "layout", "menu.json"))
+	assertPathMissing(t, filepath.Join(unpackRoot, "gamedata", metadataFileName))
+	assertPathMissing(t, filepath.Join(unpackRoot, "gamedata", metadataRawDirName))
+}
+
+func TestUnpackDirectoryDumpMetadata(t *testing.T) {
+	inputRoot := t.TempDir()
+	outputRoot := t.TempDir()
+	unpackRoot := t.TempDir()
+
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), []byte("print('a')\n"))
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), []byte("alpha"))
+
+	if _, err := PackDirectory(inputRoot, outputRoot); err != nil {
+		t.Fatalf("pack directory: %v", err)
+	}
+
+	if _, err := UnpackDirectoryWithOptions(outputRoot, unpackRoot, &UnpackOptions{DumpMetadata: true}); err != nil {
+		t.Fatalf("unpack directory with metadata: %v", err)
+	}
+
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), filepath.Join(unpackRoot, "gamedata", "scripts", "a.lua"))
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), filepath.Join(unpackRoot, "gamedata", "textures", "alpha.txt"))
+	metadataPath := filepath.Join(unpackRoot, "gamedata", metadataFileName)
+	assertPathExists(t, metadataPath)
+	assertPathExists(t, filepath.Join(unpackRoot, "gamedata", metadataRawDirName))
+
+	rawMetadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var metadata ArchiveInfo
+	if err := json.Unmarshal(rawMetadata, &metadata); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if metadata.Header.Signature != headerSignature {
+		t.Fatalf("metadata signature = %q", metadata.Header.Signature)
+	}
+	if len(metadata.NameRecords) != 2 || len(metadata.FileEntries) != 2 || len(metadata.Chunks) != 2 {
+		t.Fatalf("metadata did not use unified archive model: names=%d file_entries=%d chunks=%d", len(metadata.NameRecords), len(metadata.FileEntries), len(metadata.Chunks))
+	}
+	if metadata.Tables.NameTable == "" || metadata.Tables.FileTable == "" || metadata.Tables.ChunkTable == "" {
+		t.Fatalf("metadata missing raw table paths: %#v", metadata.Tables)
+	}
+	if len(metadata.Files) != 2 || metadata.Files[0].SHA1 == "" || len(metadata.Files[0].Chunks) == 0 || metadata.Files[0].Chunks[0].Payload == "" {
+		t.Fatalf("metadata missing replay fields: %#v", metadata.Files)
+	}
+}
+
+func TestUnpackDirectoryWithThreadCount(t *testing.T) {
+	inputRoot := t.TempDir()
+	outputRoot := t.TempDir()
+	unpackRoot := t.TempDir()
+
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), []byte("print('a')\n"))
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "b.lua"), []byte("print('b')\n"))
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), []byte("alpha"))
+
+	if _, err := PackDirectory(inputRoot, outputRoot); err != nil {
+		t.Fatalf("pack directory: %v", err)
+	}
+
+	if _, err := UnpackDirectoryWithOptions(outputRoot, unpackRoot, &UnpackOptions{Threads: 2}); err != nil {
+		t.Fatalf("unpack directory with threads: %v", err)
+	}
+
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), filepath.Join(unpackRoot, "gamedata", "scripts", "a.lua"))
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "scripts", "b.lua"), filepath.Join(unpackRoot, "gamedata", "scripts", "b.lua"))
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), filepath.Join(unpackRoot, "gamedata", "textures", "alpha.txt"))
+}
+
+func TestUnpackFileWithOptionsExtractsIntoOutputRoot(t *testing.T) {
+	inputRoot := t.TempDir()
+	outputRoot := t.TempDir()
+	unpackRoot := t.TempDir()
+
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), []byte("print('a')\n"))
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), []byte("alpha"))
+
+	if _, err := PackDirectory(inputRoot, outputRoot); err != nil {
+		t.Fatalf("pack directory: %v", err)
+	}
+
+	if _, err := UnpackFileWithOptions(filepath.Join(outputRoot, "gamedata.pak"), unpackRoot, &UnpackOptions{Threads: 2}); err != nil {
+		t.Fatalf("unpack file: %v", err)
+	}
+
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), filepath.Join(unpackRoot, "scripts", "a.lua"))
+	assertFileBytes(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), filepath.Join(unpackRoot, "textures", "alpha.txt"))
+	assertPathMissing(t, filepath.Join(unpackRoot, "gamedata"))
+}
+
+func TestUnpackDirectoryRejectsInvalidThreadCount(t *testing.T) {
+	if _, err := UnpackDirectoryWithOptions(t.TempDir(), t.TempDir(), &UnpackOptions{Threads: -1}); err == nil {
+		t.Fatal("expected invalid thread count error")
+	}
+}
+
+func TestInspectArchiveJSONModel(t *testing.T) {
+	inputRoot := t.TempDir()
+	outputRoot := t.TempDir()
+
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), []byte("print('a')\n"))
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "textures", "alpha.txt"), []byte("alpha"))
+
+	if _, err := PackDirectory(inputRoot, outputRoot); err != nil {
+		t.Fatalf("pack directory: %v", err)
+	}
+
+	inspection, err := InspectArchive(filepath.Join(outputRoot, "gamedata.pak"))
+	if err != nil {
+		t.Fatalf("inspect archive: %v", err)
+	}
+	data, err := json.Marshal(inspection)
+	if err != nil {
+		t.Fatalf("marshal inspection: %v", err)
+	}
+	if !json.Valid(data) {
+		t.Fatal("inspection JSON is invalid")
+	}
+	if inspection.Header.Signature != headerSignature {
+		t.Fatalf("unexpected signature %s", inspection.Header.Signature)
+	}
+	if len(inspection.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(inspection.Files))
+	}
+	if len(inspection.Chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(inspection.Chunks))
+	}
+	if len(inspection.NameRecords) != 2 || len(inspection.FileEntries) != 2 {
+		t.Fatalf("expected unified model details, got names=%d file_entries=%d", len(inspection.NameRecords), len(inspection.FileEntries))
+	}
+	if inspection.Files[0].ArchivePath != archivePathFromRelative("scripts/a.lua") {
+		t.Fatalf("unexpected first file path %s", inspection.Files[0].ArchivePath)
+	}
+}
+
+func TestWriteArchiveInspectionText(t *testing.T) {
+	inputRoot := t.TempDir()
+	outputRoot := t.TempDir()
+
+	writeFixtureFile(t, filepath.Join(inputRoot, "gamedata", "scripts", "a.lua"), []byte("print('a')\n"))
+
+	if _, err := PackDirectory(inputRoot, outputRoot); err != nil {
+		t.Fatalf("pack directory: %v", err)
+	}
+
+	inspection, err := InspectArchive(filepath.Join(outputRoot, "gamedata.pak"))
+	if err != nil {
+		t.Fatalf("inspect archive: %v", err)
+	}
+
+	var buffer bytes.Buffer
+	if err := WriteArchiveInspectionText(&buffer, inspection); err != nil {
+		t.Fatalf("write inspection text: %v", err)
+	}
+
+	text := buffer.String()
+	for _, expected := range []string{"header:", "tables:", "files:", "chunks:", "scripts\\\\a.lua"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("inspection text missing %q:\n%s", expected, text)
+		}
+	}
 }
 
 func TestPackDirectoryDeterministic(t *testing.T) {
@@ -118,7 +282,7 @@ func TestRealArchiveRoundTripPreservesOrderingMetadata(t *testing.T) {
 		t.Fatalf("write unpack input: %v", err)
 	}
 
-	if _, err := UnpackDirectory(unpackInput, unpackOutput); err != nil {
+	if _, err := UnpackDirectoryWithOptions(unpackInput, unpackOutput, &UnpackOptions{DumpMetadata: true}); err != nil {
 		t.Fatalf("unpack original sample: %v", err)
 	}
 	if _, err := PackDirectory(unpackOutput, repackOutput); err != nil {
@@ -187,7 +351,7 @@ func TestRealArchiveRoundTripIsByteIdentical(t *testing.T) {
 		t.Fatalf("write unpack input: %v", err)
 	}
 
-	if _, err := UnpackDirectory(unpackInput, unpackOutput); err != nil {
+	if _, err := UnpackDirectoryWithOptions(unpackInput, unpackOutput, &UnpackOptions{DumpMetadata: true}); err != nil {
 		t.Fatalf("unpack original sample: %v", err)
 	}
 	if _, err := PackDirectory(unpackOutput, repackOutput); err != nil {
@@ -277,6 +441,20 @@ func assertFileBytes(t *testing.T, leftPath string, rightPath string) {
 	}
 	if !bytes.Equal(left, right) {
 		t.Fatalf("file mismatch: %s != %s", leftPath, rightPath)
+	}
+}
+
+func assertPathExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be absent, got stat error %v", path, err)
 	}
 }
 

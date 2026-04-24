@@ -1,11 +1,11 @@
-package types
+package defgraph
 
 import (
 	"sort"
 	"strconv"
 	"strings"
 
-	"defgraph/internal/collections"
+	"sc_cli/internal/collections"
 )
 
 func SortNumericStrings(values []string) []string {

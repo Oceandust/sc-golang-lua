@@ -1,9 +1,21 @@
-package types
+package defgraph
 
 import (
-	"encoding"
 	"encoding/json"
 	"fmt"
+)
+
+var (
+	_ json.Marshaler   = (*RecordKind)(nil)
+	_ json.Unmarshaler = (*RecordKind)(nil)
+	_ json.Marshaler   = (*LoaderName)(nil)
+	_ json.Unmarshaler = (*LoaderName)(nil)
+	_ json.Marshaler   = (*LoaderRuntime)(nil)
+	_ json.Unmarshaler = (*LoaderRuntime)(nil)
+	_ json.Marshaler   = (*VariantKind)(nil)
+	_ json.Unmarshaler = (*VariantKind)(nil)
+	_ json.Marshaler   = (*CraftIngredientKind)(nil)
+	_ json.Unmarshaler = (*CraftIngredientKind)(nil)
 )
 
 type DefID string
@@ -56,13 +68,6 @@ const (
 	LoaderRuntimeLuaJIT LoaderRuntime = "luajit"
 )
 
-type OutputFormat string
-
-const (
-	OutputFormatText OutputFormat = "text"
-	OutputFormatJSON OutputFormat = "json"
-)
-
 type VariantKind string
 
 const (
@@ -98,23 +103,6 @@ const (
 	WeaponClassLaser WeaponClassName = "LASER"
 )
 
-var (
-	_ encoding.TextMarshaler   = (*OutputFormat)(nil)
-	_ encoding.TextUnmarshaler = (*OutputFormat)(nil)
-	_ json.Marshaler           = (*RecordKind)(nil)
-	_ json.Unmarshaler         = (*RecordKind)(nil)
-	_ json.Marshaler           = (*LoaderName)(nil)
-	_ json.Unmarshaler         = (*LoaderName)(nil)
-	_ json.Marshaler           = (*LoaderRuntime)(nil)
-	_ json.Unmarshaler         = (*LoaderRuntime)(nil)
-	_ json.Marshaler           = (*OutputFormat)(nil)
-	_ json.Unmarshaler         = (*OutputFormat)(nil)
-	_ json.Marshaler           = (*VariantKind)(nil)
-	_ json.Unmarshaler         = (*VariantKind)(nil)
-	_ json.Marshaler           = (*CraftIngredientKind)(nil)
-	_ json.Unmarshaler         = (*CraftIngredientKind)(nil)
-)
-
 func (value RecordKind) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(value))
 }
@@ -143,22 +131,6 @@ func (value LoaderRuntime) MarshalJSON() ([]byte, error) {
 
 func (value *LoaderRuntime) UnmarshalJSON(data []byte) error {
 	return unmarshalStringEnum(data, []LoaderRuntime{LoaderRuntimeLuaJIT}, value, "LoaderRuntime")
-}
-
-func (value OutputFormat) MarshalJSON() ([]byte, error) {
-	return json.Marshal(string(value))
-}
-
-func (value *OutputFormat) UnmarshalJSON(data []byte) error {
-	return unmarshalStringEnum(data, []OutputFormat{OutputFormatText, OutputFormatJSON}, value, "OutputFormat")
-}
-
-func (value OutputFormat) MarshalText() ([]byte, error) {
-	return []byte(value), nil
-}
-
-func (value *OutputFormat) UnmarshalText(text []byte) error {
-	return unmarshalTextEnum(text, []OutputFormat{OutputFormatText, OutputFormatJSON}, value, "OutputFormat")
 }
 
 func (value VariantKind) MarshalJSON() ([]byte, error) {
@@ -202,20 +174,6 @@ func unmarshalStringEnum[T ~string](data []byte, allowed []T, target *T, name st
 	value := T(raw)
 	if !containsEnum(allowed, value) {
 		return fmt.Errorf("invalid %s %q", name, raw)
-	}
-
-	*target = value
-	return nil
-}
-
-func unmarshalTextEnum[T ~string](text []byte, allowed []T, target *T, name string) error {
-	if target == nil {
-		return nil
-	}
-
-	value := T(string(text))
-	if !containsEnum(allowed, value) {
-		return fmt.Errorf("invalid %s %q", name, string(text))
 	}
 
 	*target = value

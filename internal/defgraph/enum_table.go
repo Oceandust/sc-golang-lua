@@ -1,9 +1,9 @@
-package types
+package defgraph
 
 import (
 	"sort"
 
-	"defgraph/internal/collections"
+	"sc_cli/internal/collections"
 )
 
 type EnumTable struct {

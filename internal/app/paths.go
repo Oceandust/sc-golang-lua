@@ -9,6 +9,13 @@ import (
 	"github.com/alecthomas/kong"
 )
 
+var (
+	_ kong.MapperValue = (*ExistingDir)(nil)
+	_ kong.MapperValue = (*ExistingFile)(nil)
+	_ kong.MapperValue = (*OutputDir)(nil)
+	_ kong.MapperValue = (*OutputFile)(nil)
+)
+
 type ExistingDir string
 type ExistingFile string
 type OutputDir string

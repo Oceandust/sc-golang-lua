@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"defgraph/internal/collections"
+	"sc_cli/internal/collections"
 )
 
 type valueKind uint8

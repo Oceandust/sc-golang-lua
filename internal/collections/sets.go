@@ -1,6 +1,58 @@
 package collections
 
-import "github.com/emirpasic/gods/sets/linkedhashset"
+import (
+	"github.com/emirpasic/gods/sets/hashset"
+	"github.com/emirpasic/gods/sets/linkedhashset"
+)
+
+type HashSet[T comparable] struct {
+	items *hashset.Set
+}
+
+func NewHashSet[T comparable]() *HashSet[T] {
+	return &HashSet[T]{items: hashset.New()}
+}
+
+func (set *HashSet[T]) ensure() {
+	if set.items != nil {
+		return
+	}
+	set.items = hashset.New()
+}
+
+func (set *HashSet[T]) Add(value T) {
+	set.ensure()
+	set.items.Add(value)
+}
+
+func (set *HashSet[T]) Remove(value T) {
+	if set == nil || set.items == nil {
+		return
+	}
+	set.items.Remove(value)
+}
+
+func (set *HashSet[T]) Clear() {
+	if set == nil {
+		return
+	}
+	set.ensure()
+	set.items.Clear()
+}
+
+func (set *HashSet[T]) Contains(value T) bool {
+	if set == nil || set.items == nil {
+		return false
+	}
+	return set.items.Contains(value)
+}
+
+func (set *HashSet[T]) Len() int {
+	if set == nil || set.items == nil {
+		return 0
+	}
+	return set.items.Size()
+}
 
 type OrderedSet[T comparable] struct {
 	items *linkedhashset.Set
@@ -20,6 +72,14 @@ func (set *OrderedSet[T]) ensure() {
 func (set *OrderedSet[T]) Add(value T) {
 	set.ensure()
 	set.items.Add(value)
+}
+
+func (set *OrderedSet[T]) Clear() {
+	if set == nil {
+		return
+	}
+	set.ensure()
+	set.items.Clear()
 }
 
 func (set *OrderedSet[T]) Contains(value T) bool {
@@ -51,8 +111,9 @@ func (set *OrderedSet[T]) Range(fn func(T) bool) {
 	if set == nil || set.items == nil {
 		return
 	}
-	for _, rawValue := range set.items.Values() {
-		if !fn(rawValue.(T)) {
+	iterator := set.items.Iterator()
+	for iterator.Next() {
+		if !fn(iterator.Value().(T)) {
 			return
 		}
 	}

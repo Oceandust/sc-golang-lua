@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"defgraph/internal/app"
+	"sc_cli/internal/app"
 )
 
 func main() {

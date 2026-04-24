@@ -3,9 +3,7 @@
 package app
 
 import (
-	"defgraph/internal/loader"
-	"defgraph/internal/snapshot"
-	"defgraph/internal/types"
+	"sc_cli/internal/defgraph"
 )
 
 type luajitDefgraphService struct{}
@@ -14,11 +12,11 @@ func newDefgraphService() defgraphService {
 	return luajitDefgraphService{}
 }
 
-func (luajitDefgraphService) LoadSnapshot(repoRoot string, compiledRoot string) (*types.Snapshot, error) {
-	world, err := loader.Load(loader.NormalizeRepoRoot(repoRoot), loader.NormalizeCompiledRoot(compiledRoot))
+func (luajitDefgraphService) LoadSnapshot(repoRoot string, compiledRoot string) (*defgraph.Snapshot, error) {
+	world, err := defgraph.LoadWorld(defgraph.NormalizeRepoRoot(repoRoot), defgraph.NormalizeCompiledRoot(compiledRoot))
 	if err != nil {
 		return nil, err
 	}
 
-	return snapshot.Build(world)
+	return defgraph.BuildSnapshot(world)
 }

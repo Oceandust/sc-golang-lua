@@ -1,18 +1,16 @@
-package snapshot
+package defgraph
 
 import (
 	"fmt"
 	"slices"
 	"strings"
-
-	"defgraph/internal/types"
 )
 
-func Validate(snapshot *types.Snapshot) error {
-	defIndex := make(map[types.DefID]types.DefRecord, len(snapshot.Defs))
-	moduleIndex := make(map[types.DefID]types.ModuleRecord, len(snapshot.Modules))
-	shipIndex := make(map[types.ShipID]types.ShipRecord, len(snapshot.Ships))
-	blueprintIndex := make(map[types.BlueprintID]types.BlueprintRecord, len(snapshot.Blueprints))
+func ValidateSnapshot(snapshot *Snapshot) error {
+	defIndex := make(map[DefID]DefRecord, len(snapshot.Defs))
+	moduleIndex := make(map[DefID]ModuleRecord, len(snapshot.Modules))
+	shipIndex := make(map[ShipID]ShipRecord, len(snapshot.Ships))
+	blueprintIndex := make(map[BlueprintID]BlueprintRecord, len(snapshot.Blueprints))
 
 	for _, item := range snapshot.Defs {
 		defIndex[item.ID] = item
@@ -27,42 +25,42 @@ func Validate(snapshot *types.Snapshot) error {
 		blueprintIndex[item.ID] = item
 	}
 
-	weapon, ok := moduleIndex[types.DefID("Weapon_DoubleThermalBlastgun_T5_Rare")]
+	weapon, ok := moduleIndex[DefID("Weapon_DoubleThermalBlastgun_T5_Rare")]
 	if !ok {
 		return fmt.Errorf("missing Weapon_DoubleThermalBlastgun_T5_Rare")
 	}
-	if weapon.InheritParent.OrElse("") != types.DefID("Weapon_DoubleThermalBlastGun") {
+	if weapon.InheritParent.OrElse("") != DefID("Weapon_DoubleThermalBlastGun") {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare inherit_parent mismatch")
 	}
-	if def, ok := defIndex[weapon.ID]; !ok || !slices.Contains(def.InheritChain, types.DefID("Weapon_AutoGun")) {
+	if def, ok := defIndex[weapon.ID]; !ok || !slices.Contains(def.InheritChain, DefID("Weapon_AutoGun")) {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare inheritance chain missing Weapon_AutoGun")
 	}
-	if weapon.WeaponClass.OrElse("") != types.WeaponClassLaser {
+	if weapon.WeaponClass.OrElse("") != WeaponClassLaser {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare weapon_class mismatch")
 	}
-	if weapon.Constraints.RequiredRole.OrElse("") != types.ShipRoleSniper {
+	if weapon.Constraints.RequiredRole.OrElse("") != ShipRoleSniper {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare required_role mismatch")
 	}
 
 	classMask, ok := weapon.Constraints.ClassMask.Get()
-	if !ok || !slices.Contains(classMask.Flags, string(types.ShipClassLarge)) {
+	if !ok || !slices.Contains(classMask.Flags, string(ShipClassLarge)) {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare class_mask missing LARGE")
 	}
-	if !strings.HasSuffix(weapon.Upgrade.Prev.OrElse(types.DefID("")).String(), "_Mk1") {
+	if !strings.HasSuffix(weapon.Upgrade.Prev.OrElse(DefID("")).String(), "_Mk1") {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare prev upgrade mismatch")
 	}
-	if !strings.HasSuffix(weapon.Upgrade.Next.OrElse(types.DefID("")).String(), "_Mk3") {
+	if !strings.HasSuffix(weapon.Upgrade.Next.OrElse(DefID("")).String(), "_Mk3") {
 		return fmt.Errorf("Weapon_DoubleThermalBlastgun_T5_Rare next upgrade mismatch")
 	}
 
-	ship, ok := shipIndex[types.ShipID("Ship_Race1_L_T5_Sniper")]
+	ship, ok := shipIndex[ShipID("Ship_Race1_L_T5_Sniper")]
 	if !ok {
 		return fmt.Errorf("missing Ship_Race1_L_T5_Sniper")
 	}
-	if ship.Role.OrElse("") != types.ShipRoleSniper {
+	if ship.Role.OrElse("") != ShipRoleSniper {
 		return fmt.Errorf("Ship_Race1_L_T5_Sniper role mismatch")
 	}
-	if ship.ShipClass.OrElse("") != types.ShipClassLarge {
+	if ship.ShipClass.OrElse("") != ShipClassLarge {
 		return fmt.Errorf("Ship_Race1_L_T5_Sniper ship_class mismatch")
 	}
 	if ship.Economy.Purchase.Price.OrElse(0) == 0 {
@@ -75,18 +73,18 @@ func Validate(snapshot *types.Snapshot) error {
 		return fmt.Errorf("Ship_Race1_L_T5_Sniper missing recraft credits")
 	}
 
-	blueprint, ok := blueprintIndex[types.BlueprintID("BP_Weapon_FrontLineCannon_T3_Mk1")]
+	blueprint, ok := blueprintIndex[BlueprintID("BP_Weapon_FrontLineCannon_T3_Mk1")]
 	if !ok {
 		return fmt.Errorf("missing BP_Weapon_FrontLineCannon_T3_Mk1")
 	}
-	if blueprint.CraftResult != types.DefID("Weapon_FrontLineCannon_T3_Mk1") {
+	if blueprint.CraftResult != DefID("Weapon_FrontLineCannon_T3_Mk1") {
 		return fmt.Errorf("BP_Weapon_FrontLineCannon_T3_Mk1 craft_result mismatch")
 	}
 	if len(blueprint.Ingredients) == 0 {
 		return fmt.Errorf("BP_Weapon_FrontLineCannon_T3_Mk1 missing ingredients")
 	}
 
-	heatingBlueprint, ok := blueprintIndex[types.BlueprintID("BP_Weapon_HeatingGun_T3_Mk1")]
+	heatingBlueprint, ok := blueprintIndex[BlueprintID("BP_Weapon_HeatingGun_T3_Mk1")]
 	if !ok {
 		return fmt.Errorf("missing BP_Weapon_HeatingGun_T3_Mk1")
 	}

@@ -1,30 +1,27 @@
-package snapshot
+package defgraph
 
 import (
 	"testing"
-
-	"defgraph/internal/luavalue"
-	"defgraph/internal/types"
 )
 
 func TestDetectVariantKind(t *testing.T) {
-	fields := luavalue.NewObject()
-	fields.Set("mark", luavalue.Int(7))
+	fields := NewLuaObject()
+	fields.Set("mark", LuaInt(7))
 
-	value := detectVariantKind(types.DefID("Weapon_Test_T4_Epic"), fields)
-	if value.OrElse("") != types.VariantKindEpic {
+	value := detectVariantKind(DefID("Weapon_Test_T4_Epic"), fields)
+	if value.OrElse("") != VariantKindEpic {
 		t.Fatalf("variant kind = %q", value.OrElse(""))
 	}
 }
 
 func TestMergeObjectsHonorsDontInherit(t *testing.T) {
-	parent := luavalue.NewObject()
-	parent.Set("material", luavalue.String("Metal"))
-	parent.Set("tier", luavalue.Int(5))
+	parent := NewLuaObject()
+	parent.Set("material", LuaString("Metal"))
+	parent.Set("tier", LuaInt(5))
 
-	child := luavalue.NewObject()
-	child.Set("material", luavalue.String(types.DontInheritSentinel))
-	child.Set("rank", luavalue.Int(12))
+	child := NewLuaObject()
+	child.Set("material", LuaString(DontInheritSentinel))
+	child.Set("rank", LuaInt(12))
 
 	merged := mergeObjects(parent, child)
 

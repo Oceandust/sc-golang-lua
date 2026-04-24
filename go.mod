@@ -1,4 +1,4 @@
-module defgraph
+module sc_cli
 
 go 1.26.1
 
@@ -7,4 +7,5 @@ require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/emirpasic/gods v1.18.1
 	github.com/samber/mo v1.16.0
+	golang.org/x/sync v0.20.0
 )

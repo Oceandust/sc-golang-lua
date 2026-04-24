@@ -4,13 +4,14 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 
-	"defgraph/internal/collections"
+	"sc_cli/internal/collections"
 )
 
 const (
@@ -22,55 +23,20 @@ const (
 	metadataChunkTableFile = "chunk_table.bin"
 )
 
-type archiveMetadata struct {
-	Header    archiveMetadataHeader `json:"header"`
-	FileIndex []int32               `json:"file_index"`
-	Files     []archiveMetadataFile `json:"files"`
-	Tables    archiveMetadataTables `json:"tables"`
-}
-
-type archiveMetadataHeader struct {
-	Version  int32 `json:"version"`
-	Unknown1 int32 `json:"unknown1"`
-	Reserved int32 `json:"reserved"`
-}
-
-type archiveMetadataTables struct {
-	NameTable  string `json:"name_table"`
-	FileTable  string `json:"file_table"`
-	ChunkTable string `json:"chunk_table"`
-}
-
-type archiveMetadataFile struct {
-	ArchivePath string                 `json:"archive_path"`
-	NameOffset  int32                  `json:"name_offset"`
-	FileSize    int32                  `json:"file_size"`
-	ChunkCount  int32                  `json:"chunk_count"`
-	ChunkIndex  int32                  `json:"chunk_index"`
-	SHA1        string                 `json:"sha1"`
-	Chunks      []archiveMetadataChunk `json:"chunks"`
-}
-
-type archiveMetadataChunk struct {
-	FileOffset       int32  `json:"file_offset"`
-	UncompressedSize int32  `json:"uncompressed_size"`
-	CompressedSize   int32  `json:"compressed_size"`
-	Payload          string `json:"payload"`
-}
-
 type metadataIndex struct {
-	filesByPath *collections.HashMap[string, archiveMetadataFile]
+	filesByPath *collections.HashMap[string, *ArchiveFileInfo]
 }
 
-func newMetadataIndex(metadata archiveMetadata) metadataIndex {
-	filesByPath := collections.NewHashMap[string, archiveMetadataFile]()
-	for _, file := range metadata.Files {
+func newMetadataIndex(metadata *ArchiveInfo) *metadataIndex {
+	filesByPath := collections.NewHashMap[string, *ArchiveFileInfo]()
+	for index := range metadata.Files {
+		file := &metadata.Files[index]
 		filesByPath.Put(file.ArchivePath, file)
 	}
-	return metadataIndex{filesByPath: filesByPath}
+	return &metadataIndex{filesByPath: filesByPath}
 }
 
-func (index metadataIndex) Get(path string) (archiveMetadataFile, bool) {
+func (index *metadataIndex) Get(path string) (*ArchiveFileInfo, bool) {
 	return index.filesByPath.Get(path)
 }
 
@@ -91,63 +57,54 @@ func writeArchiveMetadata(targetDir string, reader *archiveReader) error {
 		return err
 	}
 
-	files := make([]archiveMetadataFile, 0, len(reader.layout.Files))
-	for _, file := range reader.layout.Files {
+	metadata := archiveInfoFromLayout("", reader.layout)
+	metadata.Tables.NameTable = filepath.ToSlash(filepath.Join(metadataRawDirName, metadataNameTableFile))
+	metadata.Tables.FileTable = filepath.ToSlash(filepath.Join(metadataRawDirName, metadataFileTableFile))
+	metadata.Tables.ChunkTable = filepath.ToSlash(filepath.Join(metadataRawDirName, metadataChunkTableFile))
+
+	for fileIndex := range reader.layout.Files {
+		file := &reader.layout.Files[fileIndex]
+		if file.ChunkCount < 0 {
+			return fmt.Errorf("invalid negative chunk count for %s", file.ArchivePath)
+		}
+
 		targetPath := outputPath(targetDir, file.ArchivePath)
 		hash, err := fileSHA1Hex(targetPath)
 		if err != nil {
 			return err
 		}
 
-		chunks := make([]archiveMetadataChunk, 0, file.ChunkCount)
+		chunks := make([]ArchiveChunkInfo, int(file.ChunkCount))
 		for chunkOffset := int32(0); chunkOffset < file.ChunkCount; chunkOffset++ {
 			chunkIndex := file.ChunkIndex + chunkOffset
-			chunk := reader.layout.Chunks[chunkIndex]
-			payload, err := reader.readRawChunk(chunk)
+			if chunkIndex < 0 || int(chunkIndex) >= len(reader.layout.Chunks) {
+				return fmt.Errorf("chunk index %d out of range for %s", chunkIndex, file.ArchivePath)
+			}
+			chunk := &reader.layout.Chunks[chunkIndex]
+
+			payloadRelativePath := filepath.ToSlash(filepath.Join(metadataChunksDirName, fmt.Sprintf("%06d.bin", chunkIndex)))
+			payloadFile, err := os.Create(filepath.Join(rawDir, filepath.FromSlash(payloadRelativePath)))
 			if err != nil {
 				return err
 			}
-
-			payloadRelativePath := filepath.ToSlash(filepath.Join(metadataChunksDirName, fmt.Sprintf("%06d.bin", chunkIndex)))
-			if err := os.WriteFile(filepath.Join(rawDir, filepath.FromSlash(payloadRelativePath)), payload, 0o644); err != nil {
+			writeErr := reader.writeRawChunk(payloadFile, chunk)
+			closeErr := payloadFile.Close()
+			if err := errors.Join(writeErr, closeErr); err != nil {
 				return err
 			}
 
-			chunks = append(chunks, archiveMetadataChunk{
+			chunks[int(chunkOffset)] = ArchiveChunkInfo{
+				Index:            int(chunkIndex),
 				FileOffset:       chunk.FileOffset,
 				UncompressedSize: chunk.UncompressedSize,
+				DataOffset:       chunk.DataOffset,
 				CompressedSize:   chunk.CompressedSize,
 				Payload:          payloadRelativePath,
-			})
+			}
 		}
 
-		files = append(files, archiveMetadataFile{
-			ArchivePath: file.ArchivePath,
-			NameOffset:  file.NameOffset,
-			FileSize:    file.FileSize,
-			ChunkCount:  file.ChunkCount,
-			ChunkIndex:  file.ChunkIndex,
-			SHA1:        hash,
-			Chunks:      chunks,
-		})
-	}
-
-	fileIndex := make([]int32, len(reader.layout.FileIndex))
-	copy(fileIndex, reader.layout.FileIndex)
-
-	metadata := archiveMetadata{
-		Header: archiveMetadataHeader{
-			Version:  reader.layout.Header.Version,
-			Unknown1: reader.layout.Header.Unknown1,
-			Reserved: reader.layout.Header.Reserved,
-		},
-		FileIndex: fileIndex,
-		Files:     files,
-		Tables: archiveMetadataTables{
-			NameTable:  filepath.ToSlash(filepath.Join(metadataRawDirName, metadataNameTableFile)),
-			FileTable:  filepath.ToSlash(filepath.Join(metadataRawDirName, metadataFileTableFile)),
-			ChunkTable: filepath.ToSlash(filepath.Join(metadataRawDirName, metadataChunkTableFile)),
-		},
+		metadata.Files[fileIndex].SHA1 = hash
+		metadata.Files[fileIndex].Chunks = chunks
 	}
 
 	encoded, err := json.MarshalIndent(metadata, "", "  ")
@@ -158,31 +115,79 @@ func writeArchiveMetadata(targetDir string, reader *archiveReader) error {
 	return os.WriteFile(filepath.Join(targetDir, metadataFileName), encoded, 0o644)
 }
 
-func readArchiveMetadata(sourceDir string) (archiveMetadata, bool, error) {
+func readArchiveMetadata(sourceDir string) (ArchiveInfo, bool, error) {
 	path := filepath.Join(sourceDir, metadataFileName)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return archiveMetadata{}, false, nil
+			return ArchiveInfo{}, false, nil
 		}
-		return archiveMetadata{}, false, err
+		return ArchiveInfo{}, false, err
 	}
 
-	metadata := archiveMetadata{}
+	metadata := ArchiveInfo{}
 	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return archiveMetadata{}, false, err
+		return ArchiveInfo{}, false, err
 	}
-	if metadata.Header.Version == 0 {
-		metadata.Header.Version = formatVersion
-	}
-	if metadata.Header.Reserved == 0 {
-		metadata.Header.Reserved = headerReserved
+	if err := validateArchiveMetadata(&metadata); err != nil {
+		return ArchiveInfo{}, false, err
 	}
 
 	return metadata, true, nil
 }
 
-func orderSourceFiles(files []sourceFile, metadata archiveMetadata, hasMetadata bool) ([]sourceFile, []int32, error) {
+func validateArchiveMetadata(metadata *ArchiveInfo) error {
+	if metadata.Header.Signature != headerSignature {
+		return fmt.Errorf("invalid metadata signature %q", metadata.Header.Signature)
+	}
+	if metadata.Header.Version != formatVersion {
+		return fmt.Errorf("unsupported metadata TPAK version %d", metadata.Header.Version)
+	}
+	if metadata.Header.FileCount != int32(len(metadata.Files)) {
+		return fmt.Errorf("metadata file count mismatch: header=%d files=%d", metadata.Header.FileCount, len(metadata.Files))
+	}
+	if metadata.Tables.NameRecordCount != len(metadata.NameRecords) {
+		return fmt.Errorf("metadata name record count mismatch: table=%d records=%d", metadata.Tables.NameRecordCount, len(metadata.NameRecords))
+	}
+	if metadata.Tables.FileIndexCount != len(metadata.FileIndex) {
+		return fmt.Errorf("metadata file index count mismatch: table=%d index=%d", metadata.Tables.FileIndexCount, len(metadata.FileIndex))
+	}
+	if metadata.Tables.FileEntryCount != len(metadata.FileEntries) {
+		return fmt.Errorf("metadata file entry count mismatch: table=%d entries=%d", metadata.Tables.FileEntryCount, len(metadata.FileEntries))
+	}
+	if metadata.Tables.ChunkCount != len(metadata.Chunks) {
+		return fmt.Errorf("metadata chunk count mismatch: table=%d chunks=%d", metadata.Tables.ChunkCount, len(metadata.Chunks))
+	}
+	if metadata.Tables.NameTable == "" || metadata.Tables.FileTable == "" || metadata.Tables.ChunkTable == "" {
+		return fmt.Errorf("metadata raw table paths are required")
+	}
+	if metadata.Tables.CompressedFileTableSize <= 0 || metadata.Tables.CompressedChunkTableSize <= 0 || metadata.Tables.HeaderEnd <= 0 {
+		return fmt.Errorf("metadata table sizes and header end are required")
+	}
+	for index := range metadata.Files {
+		file := &metadata.Files[index]
+		if file.Index != index {
+			return fmt.Errorf("metadata file index mismatch for %s: index=%d position=%d", file.ArchivePath, file.Index, index)
+		}
+		if file.ArchivePath == "" {
+			return fmt.Errorf("metadata file at index %d is missing archive path", index)
+		}
+		if file.SHA1 == "" {
+			return fmt.Errorf("metadata file %s is missing sha1", file.ArchivePath)
+		}
+		if int(file.ChunkCount) != len(file.Chunks) {
+			return fmt.Errorf("metadata chunk count mismatch for %s", file.ArchivePath)
+		}
+		for chunkOffset := range file.Chunks {
+			if file.Chunks[chunkOffset].Payload == "" {
+				return fmt.Errorf("metadata file %s chunk %d is missing payload", file.ArchivePath, chunkOffset)
+			}
+		}
+	}
+	return nil
+}
+
+func orderSourceFiles(files []sourceFile, metadata *ArchiveInfo, hasMetadata bool) ([]sourceFile, []int32, error) {
 	if !hasMetadata {
 		sort.Slice(files, func(left int, right int) bool {
 			return files[left].ArchivePath < files[right].ArchivePath

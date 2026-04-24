@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"compress/flate"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
-	"defgraph/internal/collections"
+	"sc_cli/internal/collections"
 )
 
 func packArchiveDirectory(sourceDir string, outputPath string) error {
@@ -19,7 +20,7 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		return err
 	}
 
-	files, fileIndex, nameTable, err := collectSourceFiles(sourceDir, metadata, hasMetadata)
+	files, fileIndex, nameTable, err := collectSourceFiles(sourceDir, &metadata, hasMetadata)
 	if err != nil {
 		return err
 	}
@@ -27,12 +28,12 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		return fmt.Errorf("archive %s is empty", sourceDir)
 	}
 
-	canReplayOriginal, err := canReplayOriginalArchive(files, metadata, hasMetadata)
+	canReplayOriginal, err := canReplayOriginalArchive(files, &metadata, hasMetadata)
 	if err != nil {
 		return err
 	}
 	if canReplayOriginal {
-		return replayOriginalArchive(sourceDir, outputPath, nameTable, metadata)
+		return replayOriginalArchive(sourceDir, outputPath, nameTable, &metadata)
 	}
 
 	nameTableCompressed, err := rawDeflate(nameTable)
@@ -52,10 +53,11 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		_ = os.Remove(dataSpool.Name())
 	}()
 
-	metadataLookup := newMetadataIndex(metadata)
+	metadataLookup := newMetadataIndex(&metadata)
 	fileEntries := make([]fileEntry, 0, len(files))
 	chunkEntries := make([]chunkEntry, 0, len(files))
-	for _, item := range files {
+	for index := range files {
+		item := &files[index]
 		entry, chunks, err := spoolArchiveFile(dataSpool, sourceDir, item, metadataLookup, hasMetadata)
 		if err != nil {
 			return err
@@ -119,7 +121,7 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		header.Unknown1 = headerUnknown1
 		header.Reserved = headerReserved
 	}
-	if err := writeArchiveHeader(outputFile, header); err != nil {
+	if err := writeArchiveHeader(outputFile, &header); err != nil {
 		return err
 	}
 	if _, err := outputFile.Write(nameTableCompressed); err != nil {
@@ -171,7 +173,7 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 	return nil
 }
 
-func collectSourceFiles(sourceDir string, metadata archiveMetadata, hasMetadata bool) ([]sourceFile, []int32, []byte, error) {
+func collectSourceFiles(sourceDir string, metadata *ArchiveInfo, hasMetadata bool) ([]sourceFile, []int32, []byte, error) {
 	archivePaths := collections.NewOrderedSet[string]()
 	files := make([]sourceFile, 0)
 
@@ -295,11 +297,8 @@ func spoolFileChunk(dataSpool *os.File, sourcePath string) (spoolChunk, error) {
 	uncompressedSize, copyErr := io.Copy(compressor, sourceFile)
 	closeErr := compressor.Close()
 	_ = sourceFile.Close()
-	if copyErr != nil {
-		return spoolChunk{}, copyErr
-	}
-	if closeErr != nil {
-		return spoolChunk{}, closeErr
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		return spoolChunk{}, err
 	}
 	if uncompressedSize > int64(^uint32(0)>>1) {
 		return spoolChunk{}, fmt.Errorf("file %s is too large for TPAK v7", sourcePath)
@@ -342,7 +341,7 @@ func spoolFileChunk(dataSpool *os.File, sourcePath string) (spoolChunk, error) {
 	}, nil
 }
 
-func canReplayOriginalArchive(files []sourceFile, metadata archiveMetadata, hasMetadata bool) (bool, error) {
+func canReplayOriginalArchive(files []sourceFile, metadata *ArchiveInfo, hasMetadata bool) (bool, error) {
 	if !hasMetadata || len(files) == 0 || len(files) != len(metadata.Files) {
 		return false, nil
 	}
@@ -353,8 +352,9 @@ func canReplayOriginalArchive(files []sourceFile, metadata archiveMetadata, hasM
 		return false, nil
 	}
 
-	for index, item := range files {
-		metadataFile := metadata.Files[index]
+	for index := range files {
+		item := &files[index]
+		metadataFile := &metadata.Files[index]
 		if item.ArchivePath != metadataFile.ArchivePath {
 			return false, nil
 		}
@@ -371,7 +371,7 @@ func canReplayOriginalArchive(files []sourceFile, metadata archiveMetadata, hasM
 	return true, nil
 }
 
-func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte, metadata archiveMetadata) error {
+func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte, metadata *ArchiveInfo) error {
 	nameTableCompressed, err := os.ReadFile(metadataRelativePath(sourceDir, metadata.Tables.NameTable))
 	if err != nil {
 		return err
@@ -405,14 +405,15 @@ func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte
 	if _, err := outputFile.Write([]byte(headerSignature)); err != nil {
 		return err
 	}
-	if err := writeArchiveHeader(outputFile, archiveHeader{
+	header := archiveHeader{
 		Version:                 metadata.Header.Version,
 		Unknown1:                metadata.Header.Unknown1,
 		FileCount:               int32(len(metadata.Files)),
 		Reserved:                metadata.Header.Reserved,
 		NameTableSize:           int32(len(nameTable)),
 		CompressedNameTableSize: int32(len(nameTableCompressed)),
-	}); err != nil {
+	}
+	if err := writeArchiveHeader(outputFile, &header); err != nil {
 		return err
 	}
 	if _, err := outputFile.Write(nameTableCompressed); err != nil {
@@ -451,7 +452,8 @@ func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte
 		return err
 	}
 
-	for _, payloadPath := range chunkPayloads {
+	for index := range chunkPayloads {
+		payloadPath := chunkPayloads[index]
 		if err := appendFileContents(outputFile, payloadPath); err != nil {
 			return err
 		}
@@ -460,20 +462,23 @@ func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte
 	return nil
 }
 
-func orderedChunkPayloads(sourceDir string, metadata archiveMetadata) ([]string, int, error) {
+func orderedChunkPayloads(sourceDir string, metadata *ArchiveInfo) ([]string, int, error) {
 	chunkCount := 0
-	for _, file := range metadata.Files {
+	for index := range metadata.Files {
+		file := &metadata.Files[index]
 		chunkCount += len(file.Chunks)
 	}
 
 	chunkPayloads := make([]string, chunkCount)
-	for _, file := range metadata.Files {
+	for fileIndex := range metadata.Files {
+		file := &metadata.Files[fileIndex]
 		if int(file.ChunkCount) != len(file.Chunks) {
 			return nil, 0, fmt.Errorf("metadata chunk count mismatch for %s", file.ArchivePath)
 		}
 
-		for index, chunk := range file.Chunks {
-			chunkIndex := int(file.ChunkIndex) + index
+		for chunkOffset := range file.Chunks {
+			chunk := &file.Chunks[chunkOffset]
+			chunkIndex := int(file.ChunkIndex) + chunkOffset
 			if chunkIndex < 0 || chunkIndex >= len(chunkPayloads) {
 				return nil, 0, fmt.Errorf("metadata chunk index %d out of range for %s", chunkIndex, file.ArchivePath)
 			}
@@ -490,7 +495,7 @@ func orderedChunkPayloads(sourceDir string, metadata archiveMetadata) ([]string,
 	return chunkPayloads, chunkCount, nil
 }
 
-func spoolArchiveFile(dataSpool *os.File, sourceDir string, item sourceFile, metadata metadataIndex, hasMetadata bool) (fileEntry, []chunkEntry, error) {
+func spoolArchiveFile(dataSpool *os.File, sourceDir string, item *sourceFile, metadata *metadataIndex, hasMetadata bool) (fileEntry, []chunkEntry, error) {
 	if hasMetadata {
 		metadataFile, ok := metadata.Get(item.ArchivePath)
 		if ok {
@@ -521,13 +526,14 @@ func spoolArchiveFile(dataSpool *os.File, sourceDir string, item sourceFile, met
 	}, []chunkEntry{chunk.Entry}, nil
 }
 
-func spoolOriginalChunks(dataSpool *os.File, sourceDir string, metadataFile archiveMetadataFile) ([]chunkEntry, error) {
+func spoolOriginalChunks(dataSpool *os.File, sourceDir string, metadataFile *ArchiveFileInfo) ([]chunkEntry, error) {
 	if int(metadataFile.ChunkCount) != len(metadataFile.Chunks) {
 		return nil, fmt.Errorf("metadata chunk count mismatch for %s", metadataFile.ArchivePath)
 	}
 
 	chunks := make([]chunkEntry, 0, len(metadataFile.Chunks))
-	for _, metadataChunk := range metadataFile.Chunks {
+	for index := range metadataFile.Chunks {
+		metadataChunk := &metadataFile.Chunks[index]
 		chunkOffset, err := dataSpool.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return nil, err
@@ -561,8 +567,8 @@ func appendFileContents(destination *os.File, sourcePath string) error {
 
 func binaryEntries[T any](entries []T) ([]byte, error) {
 	buffer := bytes.NewBuffer(nil)
-	for _, entry := range entries {
-		if err := binary.Write(buffer, binary.LittleEndian, entry); err != nil {
+	for index := range entries {
+		if err := binary.Write(buffer, binary.LittleEndian, &entries[index]); err != nil {
 			return nil, err
 		}
 	}
@@ -584,7 +590,7 @@ func writeAlignment(file *os.File) error {
 	return err
 }
 
-func writeArchiveHeader(file *os.File, header archiveHeader) error {
+func writeArchiveHeader(file *os.File, header *archiveHeader) error {
 	if err := binary.Write(file, binary.LittleEndian, header.Version); err != nil {
 		return err
 	}

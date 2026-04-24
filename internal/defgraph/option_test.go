@@ -1,4 +1,4 @@
-package types
+package defgraph
 
 import (
 	"encoding/json"

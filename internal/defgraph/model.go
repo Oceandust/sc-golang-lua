@@ -1,11 +1,9 @@
-package types
-
-import "defgraph/internal/luavalue"
+package defgraph
 
 type RawDef struct {
 	ID            DefID
 	SourceFile    ScriptPath
-	LocalFields   luavalue.Object
+	LocalFields   LuaObject
 	InheritParent Option[DefID]
 }
 
@@ -18,7 +16,7 @@ type World struct {
 	Warnings               []string
 	Enums                  EnumRegistry
 	Defs                   map[DefID]RawDef
-	PreUpgradeRequiredShip map[DefID]luavalue.Value
+	PreUpgradeRequiredShip map[DefID]LuaValue
 }
 
 type MaskValue struct {
@@ -74,13 +72,13 @@ type EconomyInfo struct {
 }
 
 type DefRecord struct {
-	ID             DefID           `json:"id"`
-	Kind           RecordKind      `json:"kind"`
-	SourceFile     ScriptPath      `json:"source_file"`
-	InheritParent  Option[DefID]   `json:"inherit_parent,omitempty"`
-	InheritChain   []DefID         `json:"inherit_chain,omitempty"`
-	LocalFields    luavalue.Object `json:"local_fields"`
-	ResolvedFields luavalue.Object `json:"resolved_fields"`
+	ID             DefID         `json:"id"`
+	Kind           RecordKind    `json:"kind"`
+	SourceFile     ScriptPath    `json:"source_file"`
+	InheritParent  Option[DefID] `json:"inherit_parent,omitempty"`
+	InheritChain   []DefID       `json:"inherit_chain,omitempty"`
+	LocalFields    LuaObject     `json:"local_fields"`
+	ResolvedFields LuaObject     `json:"resolved_fields"`
 }
 
 type Constraints struct {

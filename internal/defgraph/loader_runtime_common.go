@@ -1,11 +1,8 @@
-package loader
+package defgraph
 
 import (
 	"path/filepath"
-	"reflect"
 	"strings"
-
-	"defgraph/internal/luavalue"
 )
 
 var bootstrapScripts = []string{
@@ -73,31 +70,6 @@ func normalizeLogicalPath(path string) string {
 	return filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
 }
 
-func diffObjectFields(baseline luavalue.Object, current luavalue.Object) luavalue.Object {
-	out := luavalue.NewObject()
-
-	current.Range(func(key string, value luavalue.Value) bool {
-		baselineValue, ok := baseline.Get(key)
-		if !ok {
-			out.Set(key, value.Clone())
-			return true
-		}
-
-		currentObject, currentIsObject := value.AsObject()
-		baselineObject, baselineIsObject := baselineValue.AsObject()
-		if currentIsObject && baselineIsObject {
-			nested := diffObjectFields(baselineObject, currentObject)
-			if nested.Len() > 0 {
-				out.Set(key, luavalue.ObjectValue(nested))
-			}
-			return true
-		}
-
-		if !reflect.DeepEqual(baselineValue, value) {
-			out.Set(key, value.Clone())
-		}
-		return true
-	})
-
-	return out
+func diffObjectFields(baseline LuaObject, current LuaObject) LuaObject {
+	return DiffLuaObjects(baseline, current)
 }
