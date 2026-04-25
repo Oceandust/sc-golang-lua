@@ -9,8 +9,12 @@ type HashSet[T comparable] struct {
 	items *hashset.Set
 }
 
-func NewHashSet[T comparable]() *HashSet[T] {
-	return &HashSet[T]{items: hashset.New()}
+func NewHashSet[T comparable](values ...T) *HashSet[T] {
+	set := &HashSet[T]{items: hashset.New()}
+	for _, value := range values {
+		set.Add(value)
+	}
+	return set
 }
 
 func (set *HashSet[T]) ensure() {
@@ -58,8 +62,12 @@ type OrderedSet[T comparable] struct {
 	items *linkedhashset.Set
 }
 
-func NewOrderedSet[T comparable]() *OrderedSet[T] {
-	return &OrderedSet[T]{items: linkedhashset.New()}
+func NewOrderedSet[T comparable](values ...T) *OrderedSet[T] {
+	set := &OrderedSet[T]{items: linkedhashset.New()}
+	for _, value := range values {
+		set.Add(value)
+	}
+	return set
 }
 
 func (set *OrderedSet[T]) ensure() {

@@ -20,26 +20,24 @@ go build -tags luajit -o sc_cli .
 #### `tpak-unpack`
 
 ```bash
-./sc_cli tpak-unpack [--threads 4] [--dump-metadata] <input-dir> <output-dir>
+./sc_cli tpak-unpack [--threads 4] <input-dir> <output-dir>
 ```
 
 Unpacks every `.pak` file directly inside `<input-dir>`.
 Each archive is extracted into `<output-dir>\<archive-name>`.
 `--threads` controls concurrent file extraction workers per archive and defaults to `4`.
-Use `--dump-metadata` to also write metadata sidecar files for byte-identical repacking workflows (TODO, not sure if they will be needed in the future).
 
 Note that path traversal was not in mind when making this, so don't run this on arbitrary data.
 
 #### `tpak-unpack-file`
 
 ```bash
-./sc_cli tpak-unpack-file [--threads 4] [--dump-metadata] <input-pak> <output-dir>
+./sc_cli tpak-unpack-file [--threads 4] <input-pak> <output-dir>
 ```
 
 Unpacks one `.pak` file directly into `<output-dir>`.
 Unlike `tpak-unpack`, this does not create an extra `<archive-name>` directory under the output directory.
 `--threads` controls concurrent file extraction workers and defaults to `4`.
-Use `--dump-metadata` to also write metadata sidecar files into `<output-dir>`.
 
 #### `tpak-inspect`
 
@@ -51,17 +49,16 @@ Prints the parsed internal structure of one `.pak` file without extracting paylo
 The output includes the header, table sizes, name records, file index, file entries, files, and chunks in archive order.
 `--format` defaults to `text`.
 
-#### `tpak-pack` (not fully functional)
+#### `tpak-pack`
 
 ```bash
 ./sc_cli tpak-pack <input-dir> <output-dir>
 ```
 
 Packs every top-level directory inside `<input-dir>` into `<output-dir>\<directory-name>.pak`.
-If an archive directory contains `.tpak.meta.json` and `.tpak.raw`, the packer uses that metadata when it can preserve original ordering and chunk payloads.
-Without metadata, it builds a fresh archive from the files in the directory.
+Archives are built fresh from the input files and are deterministic for identical input trees.
 
-#### `yup-rewrite` (experimental)
+#### `yup-rewrite`
 
 ```bash
 ./sc_cli yup-rewrite [--out <output-file>] <manifest> <root-dir>
@@ -100,13 +97,13 @@ Loads the snapshot data and runs the built-in validation checks for a few def na
 `--root` defaults to `..`.
 
 ### tpak packer/unpacker (inspired by and credit to [this project](https://github.com/Johnnynator/tpak))
-unpacker is straightforward, could be parallelized to speed things up or made more configurable
+unpacker is straightforward.
 
-packer is a bit tricky as you can see by the dumped metadata by the unpacker.
+For the packer:
 
-integrity is verified by some file metadata and hashes inside the .yup files in the root directory, so thats what the yup (the yup format is very torrent-y) rewriter is for.
+integrity is verified by some file metadata and hashes inside the .yup files in the root directory; this most likely is for the launcher-only.
 
-it will naively re-index and re-calculate everything (not ideal, but works for now)
+Additionally, some checks are enforced by a sentinel value in the binary and the server. It's calculated based on a murmurhash2 over certain archive metadata.
 
 ### Def Graph dumper/transformer/...
 Anyone familiar with the internal structure knows it's a mess to work with.

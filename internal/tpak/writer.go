@@ -2,38 +2,23 @@ package tpak
 
 import (
 	"bytes"
-	"compress/flate"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"sc_cli/internal/collections"
 )
 
 func packArchiveDirectory(sourceDir string, outputPath string) error {
-	metadata, hasMetadata, err := readArchiveMetadata(sourceDir)
-	if err != nil {
-		return err
-	}
-
-	files, fileIndex, nameTable, err := collectSourceFiles(sourceDir, &metadata, hasMetadata)
+	files, fileIndex, nameTable, err := collectSourceFiles(sourceDir)
 	if err != nil {
 		return err
 	}
 	if len(files) == 0 {
 		return fmt.Errorf("archive %s is empty", sourceDir)
-	}
-
-	canReplayOriginal, err := canReplayOriginalArchive(files, &metadata, hasMetadata)
-	if err != nil {
-		return err
-	}
-	if canReplayOriginal {
-		return replayOriginalArchive(sourceDir, outputPath, nameTable, &metadata)
 	}
 
 	nameTableCompressed, err := rawDeflate(nameTable)
@@ -53,12 +38,11 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		_ = os.Remove(dataSpool.Name())
 	}()
 
-	metadataLookup := newMetadataIndex(&metadata)
 	fileEntries := make([]fileEntry, 0, len(files))
 	chunkEntries := make([]chunkEntry, 0, len(files))
 	for index := range files {
 		item := &files[index]
-		entry, chunks, err := spoolArchiveFile(dataSpool, sourceDir, item, metadataLookup, hasMetadata)
+		entry, chunk, err := spoolArchiveFile(dataSpool, item)
 		if err != nil {
 			return err
 		}
@@ -66,30 +50,16 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		entry.NameOffset = item.NameOffset
 		entry.ChunkIndex = int32(len(chunkEntries))
 		fileEntries = append(fileEntries, entry)
-		chunkEntries = append(chunkEntries, chunks...)
+		chunkEntries = append(chunkEntries, chunk)
 	}
 
-	fileTableRaw, err := binaryEntries(fileEntries)
+	fileTableCompressed, err := compressTable(fileEntries, uint32(len(files)))
 	if err != nil {
-		return err
-	}
-	fileTableCompressed, err := rawDeflate(fileTableRaw)
-	if err != nil {
-		return err
-	}
-	if err := xorFirstWord(fileTableCompressed, uint32(len(files)+len(fileTableCompressed))); err != nil {
 		return err
 	}
 
-	chunkTableRaw, err := binaryEntries(chunkEntries)
+	chunkTableCompressed, err := compressTable(chunkEntries, uint32(len(files)+len(chunkEntries)))
 	if err != nil {
-		return err
-	}
-	chunkTableCompressed, err := rawDeflate(chunkTableRaw)
-	if err != nil {
-		return err
-	}
-	if err := xorFirstWord(chunkTableCompressed, uint32(len(files)+len(chunkTableCompressed)+len(chunkEntries))); err != nil {
 		return err
 	}
 
@@ -109,17 +79,12 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 		return err
 	}
 	header := archiveHeader{
-		Version:                 metadata.Header.Version,
-		Unknown1:                metadata.Header.Unknown1,
+		Version:                 formatVersion,
+		Unknown1:                headerUnknown1,
 		FileCount:               int32(len(files)),
-		Reserved:                metadata.Header.Reserved,
+		Reserved:                headerReserved,
 		NameTableSize:           int32(len(nameTable)),
 		CompressedNameTableSize: int32(len(nameTableCompressed)),
-	}
-	if !hasMetadata {
-		header.Version = formatVersion
-		header.Unknown1 = headerUnknown1
-		header.Reserved = headerReserved
 	}
 	if err := writeArchiveHeader(outputFile, &header); err != nil {
 		return err
@@ -173,59 +138,11 @@ func packArchiveDirectory(sourceDir string, outputPath string) error {
 	return nil
 }
 
-func collectSourceFiles(sourceDir string, metadata *ArchiveInfo, hasMetadata bool) ([]sourceFile, []int32, []byte, error) {
-	archivePaths := collections.NewOrderedSet[string]()
+func collectSourceFiles(sourceDir string) ([]sourceFile, []int32, []byte, error) {
+	archivePaths := collections.NewHashSet[string]()
 	files := make([]sourceFile, 0)
 
-	if err := filepath.WalkDir(sourceDir, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			relativePath, err := filepath.Rel(sourceDir, path)
-			if err != nil {
-				return err
-			}
-			if filepath.ToSlash(relativePath) == metadataRawDirName {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		relativePath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return err
-		}
-		relativePath = filepath.ToSlash(relativePath)
-		if relativePath == metadataFileName {
-			return nil
-		}
-		archivePath := archivePathFromRelative(relativePath)
-		if archivePaths.Contains(archivePath) {
-			return fmt.Errorf("duplicate archive path %s", archivePath)
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Size() > int64(^uint32(0)>>1) {
-			return fmt.Errorf("file %s is too large for TPAK v7", path)
-		}
-
-		archivePaths.Add(archivePath)
-		files = append(files, sourceFile{
-			ArchivePath: archivePath,
-			SourcePath:  path,
-			FileSize:    int32(info.Size()),
-		})
-		return nil
-	}); err != nil {
-		return nil, nil, nil, err
-	}
-
-	files, fileIndex, err := orderSourceFiles(files, metadata, hasMetadata)
-	if err != nil {
+	if err := walkSourceFiles(sourceDir, sourceDir, archivePaths, &files); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -241,7 +158,67 @@ func collectSourceFiles(sourceDir string, metadata *ArchiveInfo, hasMetadata boo
 		}
 	}
 
-	return files, fileIndex, nameTable.Bytes(), nil
+	return files, buildFileIndex(files), nameTable.Bytes(), nil
+}
+
+func walkSourceFiles(rootDir string, currentDir string, archivePaths *collections.HashSet[string], files *[]sourceFile) error {
+	entries, err := readDirectoryEntries(currentDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(currentDir, entry.Name())
+		if entry.IsDir() {
+			if err := walkSourceFiles(rootDir, path, archivePaths, files); err != nil {
+				return err
+			}
+			continue
+		}
+
+		relativePath, err := filepath.Rel(rootDir, path)
+		if err != nil {
+			return err
+		}
+		archivePath := archivePathFromRelative(filepath.ToSlash(relativePath))
+		if archivePaths.Contains(archivePath) {
+			return fmt.Errorf("duplicate archive path %s", archivePath)
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > int64(^uint32(0)>>1) {
+			return fmt.Errorf("file %s is too large for TPAK v7", path)
+		}
+
+		archivePaths.Add(archivePath)
+		*files = append(*files, sourceFile{
+			ArchivePath: archivePath,
+			SourcePath:  path,
+			FileSize:    int32(info.Size()),
+		})
+	}
+
+	return nil
+}
+
+func buildFileIndex(files []sourceFile) []int32 {
+	indices := make([]int, len(files))
+	for index := range files {
+		indices[index] = index
+	}
+
+	sort.SliceStable(indices, func(left int, right int) bool {
+		return files[indices[left]].ArchivePath < files[indices[right]].ArchivePath
+	})
+
+	fileIndex := make([]int32, len(files))
+	for index, fileEntryIndex := range indices {
+		fileIndex[index] = int32(fileEntryIndex)
+	}
+	return fileIndex
 }
 
 func encodeNameRecord(name string, entryIndex int) ([]byte, error) {
@@ -267,68 +244,64 @@ func encodeNameRecord(name string, entryIndex int) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-func spoolFileChunk(dataSpool *os.File, sourcePath string) (spoolChunk, error) {
+func compressTable[T any](entries []T, xorBase uint32) ([]byte, error) {
+	raw, err := binaryEntries(entries)
+	if err != nil {
+		return nil, err
+	}
+	compressed, err := rawDeflate(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := xorFirstWord(compressed, xorBase+uint32(len(compressed))); err != nil {
+		return nil, err
+	}
+	return compressed, nil
+}
+
+func spoolArchiveFile(dataSpool *os.File, item *sourceFile) (fileEntry, chunkEntry, error) {
+	chunk, err := spoolFileChunk(dataSpool, item)
+	if err != nil {
+		return fileEntry{}, chunkEntry{}, err
+	}
+	return fileEntry{
+		FileSize:   item.FileSize,
+		ChunkCount: 1,
+	}, chunk.Entry, nil
+}
+
+func spoolFileChunk(dataSpool *os.File, item *sourceFile) (spoolChunk, error) {
+	compression := compressionForArchivePath(item.ArchivePath)
+	switch compression {
+	case chunkCompressionDeflate:
+		return spoolDeflatedFileChunk(dataSpool, item.SourcePath, false)
+	case chunkCompressionAuto:
+		return spoolDeflatedFileChunk(dataSpool, item.SourcePath, true)
+	default:
+		return spoolRawFileChunk(dataSpool, item.SourcePath)
+	}
+}
+
+func spoolRawFileChunk(dataSpool *os.File, sourcePath string) (spoolChunk, error) {
 	chunkOffset, err := dataSpool.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return spoolChunk{}, err
 	}
 
-	compressedSpool, err := os.CreateTemp("", "tpak-compressed-*")
-	if err != nil {
-		return spoolChunk{}, err
-	}
-	compressedPath := compressedSpool.Name()
-	defer func() {
-		_ = compressedSpool.Close()
-		_ = os.Remove(compressedPath)
-	}()
-
 	sourceFile, err := os.Open(sourcePath)
 	if err != nil {
 		return spoolChunk{}, err
 	}
-
-	compressor, err := flate.NewWriter(compressedSpool, flate.BestCompression)
-	if err != nil {
+	defer func() {
 		_ = sourceFile.Close()
-		return spoolChunk{}, err
-	}
+	}()
 
-	uncompressedSize, copyErr := io.Copy(compressor, sourceFile)
-	closeErr := compressor.Close()
-	_ = sourceFile.Close()
-	if err := errors.Join(copyErr, closeErr); err != nil {
+	uncompressedSize, err := io.Copy(dataSpool, sourceFile)
+	if err != nil {
 		return spoolChunk{}, err
 	}
 	if uncompressedSize > int64(^uint32(0)>>1) {
 		return spoolChunk{}, fmt.Errorf("file %s is too large for TPAK v7", sourcePath)
-	}
-
-	compressedSize, err := compressedSpool.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return spoolChunk{}, err
-	}
-
-	if _, err := compressedSpool.Seek(0, io.SeekStart); err != nil {
-		return spoolChunk{}, err
-	}
-
-	storedSize := compressedSize
-	if compressedSize < uncompressedSize {
-		if _, err := io.Copy(dataSpool, compressedSpool); err != nil {
-			return spoolChunk{}, err
-		}
-	} else {
-		rawSource, err := os.Open(sourcePath)
-		if err != nil {
-			return spoolChunk{}, err
-		}
-		if _, err := io.Copy(dataSpool, rawSource); err != nil {
-			_ = rawSource.Close()
-			return spoolChunk{}, err
-		}
-		_ = rawSource.Close()
-		storedSize = uncompressedSize
 	}
 
 	return spoolChunk{
@@ -336,233 +309,46 @@ func spoolFileChunk(dataSpool *os.File, sourcePath string) (spoolChunk, error) {
 			FileOffset:       0,
 			UncompressedSize: int32(uncompressedSize),
 			DataOffset:       int32(chunkOffset),
-			CompressedSize:   int32(storedSize),
+			CompressedSize:   int32(uncompressedSize),
 		},
 	}, nil
 }
 
-func canReplayOriginalArchive(files []sourceFile, metadata *ArchiveInfo, hasMetadata bool) (bool, error) {
-	if !hasMetadata || len(files) == 0 || len(files) != len(metadata.Files) {
-		return false, nil
-	}
-	if len(metadata.FileIndex) != len(files) {
-		return false, nil
-	}
-	if metadata.Tables.NameTable == "" || metadata.Tables.FileTable == "" || metadata.Tables.ChunkTable == "" {
-		return false, nil
-	}
-
-	for index := range files {
-		item := &files[index]
-		metadataFile := &metadata.Files[index]
-		if item.ArchivePath != metadataFile.ArchivePath {
-			return false, nil
-		}
-
-		hash, err := fileSHA1Hex(item.SourcePath)
-		if err != nil {
-			return false, err
-		}
-		if hash != metadataFile.SHA1 {
-			return false, nil
-		}
-	}
-
-	return true, nil
-}
-
-func replayOriginalArchive(sourceDir string, outputPath string, nameTable []byte, metadata *ArchiveInfo) error {
-	nameTableCompressed, err := os.ReadFile(metadataRelativePath(sourceDir, metadata.Tables.NameTable))
+func spoolDeflatedFileChunk(dataSpool *os.File, sourcePath string, onlyIfSmaller bool) (spoolChunk, error) {
+	chunkOffset, err := dataSpool.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return err
+		return spoolChunk{}, err
 	}
-	fileTableCompressed, err := os.ReadFile(metadataRelativePath(sourceDir, metadata.Tables.FileTable))
+
+	sourceData, err := os.ReadFile(sourcePath)
 	if err != nil {
-		return err
+		return spoolChunk{}, err
 	}
-	chunkTableCompressed, err := os.ReadFile(metadataRelativePath(sourceDir, metadata.Tables.ChunkTable))
+	uncompressedSize := len(sourceData)
+	if int64(uncompressedSize) > int64(^uint32(0)>>1) {
+		return spoolChunk{}, fmt.Errorf("file %s is too large for TPAK v7", sourcePath)
+	}
+
+	compressedData, err := rawDeflate(sourceData)
 	if err != nil {
-		return err
+		return spoolChunk{}, err
+	}
+	compressedSize := len(compressedData)
+	if compressedSize == uncompressedSize || (onlyIfSmaller && compressedSize > uncompressedSize) {
+		return spoolRawFileChunk(dataSpool, sourcePath)
+	}
+	if _, err := dataSpool.Write(compressedData); err != nil {
+		return spoolChunk{}, err
 	}
 
-	chunkPayloads, chunkCount, err := orderedChunkPayloads(sourceDir, metadata)
-	if err != nil {
-		return err
-	}
-
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-		return err
-	}
-
-	outputFile, err := os.Create(outputPath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = outputFile.Close()
-	}()
-
-	if _, err := outputFile.Write([]byte(headerSignature)); err != nil {
-		return err
-	}
-	header := archiveHeader{
-		Version:                 metadata.Header.Version,
-		Unknown1:                metadata.Header.Unknown1,
-		FileCount:               int32(len(metadata.Files)),
-		Reserved:                metadata.Header.Reserved,
-		NameTableSize:           int32(len(nameTable)),
-		CompressedNameTableSize: int32(len(nameTableCompressed)),
-	}
-	if err := writeArchiveHeader(outputFile, &header); err != nil {
-		return err
-	}
-	if _, err := outputFile.Write(nameTableCompressed); err != nil {
-		return err
-	}
-	if err := writeAlignment(outputFile); err != nil {
-		return err
-	}
-	for _, value := range metadata.FileIndex {
-		if err := binary.Write(outputFile, binary.LittleEndian, value); err != nil {
-			return err
-		}
-	}
-	if err := writeAlignment(outputFile); err != nil {
-		return err
-	}
-	if err := binary.Write(outputFile, binary.LittleEndian, int32(len(fileTableCompressed))); err != nil {
-		return err
-	}
-	if _, err := outputFile.Write(fileTableCompressed); err != nil {
-		return err
-	}
-	if err := writeAlignment(outputFile); err != nil {
-		return err
-	}
-	if err := binary.Write(outputFile, binary.LittleEndian, int32(len(chunkTableCompressed))); err != nil {
-		return err
-	}
-	if err := binary.Write(outputFile, binary.LittleEndian, int32(chunkCount)); err != nil {
-		return err
-	}
-	if _, err := outputFile.Write(chunkTableCompressed); err != nil {
-		return err
-	}
-	if err := writeAlignment(outputFile); err != nil {
-		return err
-	}
-
-	for index := range chunkPayloads {
-		payloadPath := chunkPayloads[index]
-		if err := appendFileContents(outputFile, payloadPath); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func orderedChunkPayloads(sourceDir string, metadata *ArchiveInfo) ([]string, int, error) {
-	chunkCount := 0
-	for index := range metadata.Files {
-		file := &metadata.Files[index]
-		chunkCount += len(file.Chunks)
-	}
-
-	chunkPayloads := make([]string, chunkCount)
-	for fileIndex := range metadata.Files {
-		file := &metadata.Files[fileIndex]
-		if int(file.ChunkCount) != len(file.Chunks) {
-			return nil, 0, fmt.Errorf("metadata chunk count mismatch for %s", file.ArchivePath)
-		}
-
-		for chunkOffset := range file.Chunks {
-			chunk := &file.Chunks[chunkOffset]
-			chunkIndex := int(file.ChunkIndex) + chunkOffset
-			if chunkIndex < 0 || chunkIndex >= len(chunkPayloads) {
-				return nil, 0, fmt.Errorf("metadata chunk index %d out of range for %s", chunkIndex, file.ArchivePath)
-			}
-			chunkPayloads[chunkIndex] = metadataChunkPayloadPath(sourceDir, chunk.Payload)
-		}
-	}
-
-	for index, payloadPath := range chunkPayloads {
-		if payloadPath == "" {
-			return nil, 0, fmt.Errorf("missing payload path for chunk %d", index)
-		}
-	}
-
-	return chunkPayloads, chunkCount, nil
-}
-
-func spoolArchiveFile(dataSpool *os.File, sourceDir string, item *sourceFile, metadata *metadataIndex, hasMetadata bool) (fileEntry, []chunkEntry, error) {
-	if hasMetadata {
-		metadataFile, ok := metadata.Get(item.ArchivePath)
-		if ok {
-			hash, err := fileSHA1Hex(item.SourcePath)
-			if err != nil {
-				return fileEntry{}, nil, err
-			}
-			if hash == metadataFile.SHA1 {
-				chunks, err := spoolOriginalChunks(dataSpool, sourceDir, metadataFile)
-				if err != nil {
-					return fileEntry{}, nil, err
-				}
-				return fileEntry{
-					FileSize:   item.FileSize,
-					ChunkCount: int32(len(chunks)),
-				}, chunks, nil
-			}
-		}
-	}
-
-	chunk, err := spoolFileChunk(dataSpool, item.SourcePath)
-	if err != nil {
-		return fileEntry{}, nil, err
-	}
-	return fileEntry{
-		FileSize:   item.FileSize,
-		ChunkCount: 1,
-	}, []chunkEntry{chunk.Entry}, nil
-}
-
-func spoolOriginalChunks(dataSpool *os.File, sourceDir string, metadataFile *ArchiveFileInfo) ([]chunkEntry, error) {
-	if int(metadataFile.ChunkCount) != len(metadataFile.Chunks) {
-		return nil, fmt.Errorf("metadata chunk count mismatch for %s", metadataFile.ArchivePath)
-	}
-
-	chunks := make([]chunkEntry, 0, len(metadataFile.Chunks))
-	for index := range metadataFile.Chunks {
-		metadataChunk := &metadataFile.Chunks[index]
-		chunkOffset, err := dataSpool.Seek(0, io.SeekCurrent)
-		if err != nil {
-			return nil, err
-		}
-		if err := appendFileContents(dataSpool, metadataChunkPayloadPath(sourceDir, metadataChunk.Payload)); err != nil {
-			return nil, err
-		}
-		chunks = append(chunks, chunkEntry{
-			FileOffset:       metadataChunk.FileOffset,
-			UncompressedSize: metadataChunk.UncompressedSize,
+	return spoolChunk{
+		Entry: chunkEntry{
+			FileOffset:       0,
+			UncompressedSize: int32(uncompressedSize),
 			DataOffset:       int32(chunkOffset),
-			CompressedSize:   metadataChunk.CompressedSize,
-		})
-	}
-
-	return chunks, nil
-}
-
-func appendFileContents(destination *os.File, sourcePath string) error {
-	sourceFile, err := os.Open(sourcePath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = sourceFile.Close()
-	}()
-
-	_, err = io.Copy(destination, sourceFile)
-	return err
+			CompressedSize:   int32(compressedSize),
+		},
+	}, nil
 }
 
 func binaryEntries[T any](entries []T) ([]byte, error) {

@@ -14,17 +14,15 @@ type tpakPackCmd struct {
 }
 
 type tpakUnpackCmd struct {
-	DumpMetadata bool        `help:"Write .tpak metadata sidecar files."`
-	Threads      int         `help:"Number of concurrent file extraction workers per archive." default:"4"`
-	InputDir     ExistingDir `arg:"" help:"Directory containing .pak files to unpack."`
-	OutputDir    OutputDir   `arg:"" help:"Directory that will receive one top-level directory per archive."`
+	Threads   int         `help:"Number of concurrent file extraction workers per archive." default:"4"`
+	InputDir  ExistingDir `arg:"" help:"Directory containing .pak files to unpack."`
+	OutputDir OutputDir   `arg:"" help:"Directory that will receive one top-level directory per archive."`
 }
 
 type tpakUnpackFileCmd struct {
-	DumpMetadata bool         `help:"Write .tpak metadata sidecar files."`
-	Threads      int          `help:"Number of concurrent file extraction workers." default:"4"`
-	InputPak     ExistingFile `arg:"" help:"TPAK archive to unpack."`
-	OutputDir    OutputDir    `arg:"" help:"Directory that will receive the unpacked archive contents."`
+	Threads   int          `help:"Number of concurrent file extraction workers." default:"4"`
+	InputPak  ExistingFile `arg:"" help:"TPAK archive to unpack."`
+	OutputDir OutputDir    `arg:"" help:"Directory that will receive the unpacked archive contents."`
 }
 
 type tpakInspectCmd struct {
@@ -44,8 +42,7 @@ func (command *tpakPackCmd) Run(_ *App) error {
 
 func (command *tpakUnpackCmd) Run(_ *App) error {
 	result, err := tpak.UnpackDirectoryWithOptions(command.InputDir.Path(), command.OutputDir.Path(), &tpak.UnpackOptions{
-		DumpMetadata: command.DumpMetadata,
-		Threads:      command.Threads,
+		Threads: command.Threads,
 	})
 	if err != nil {
 		return err
@@ -57,8 +54,7 @@ func (command *tpakUnpackCmd) Run(_ *App) error {
 
 func (command *tpakUnpackFileCmd) Run(_ *App) error {
 	result, err := tpak.UnpackFileWithOptions(command.InputPak.Path(), command.OutputDir.Path(), &tpak.UnpackOptions{
-		DumpMetadata: command.DumpMetadata,
-		Threads:      command.Threads,
+		Threads: command.Threads,
 	})
 	if err != nil {
 		return err

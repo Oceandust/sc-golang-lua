@@ -6,7 +6,7 @@ import (
 )
 
 func InspectArchive(inputPak string) (*ArchiveInfo, error) {
-	reader, err := openArchiveWithMetadata(inputPak, false)
+	reader, err := openArchive(inputPak)
 	if err != nil {
 		return nil, err
 	}

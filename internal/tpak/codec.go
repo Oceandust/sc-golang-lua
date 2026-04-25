@@ -16,14 +16,14 @@ func rawDeflate(data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	if _, err := writer.Write(data); err != nil {
-		_ = writer.Close()
-		return nil, err
+	_, writeErr := writer.Write(data)
+	closeErr := writer.Close()
+	if writeErr != nil {
+		return nil, writeErr
 	}
-	if err := writer.Close(); err != nil {
-		return nil, err
+	if closeErr != nil {
+		return nil, closeErr
 	}
-
 	return buffer.Bytes(), nil
 }
 

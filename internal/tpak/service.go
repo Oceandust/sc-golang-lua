@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
@@ -50,7 +49,7 @@ func UnpackDirectoryWithOptions(inputDir string, outputDir string, options *Unpa
 		index := index
 		pakPath := pakFiles[index]
 		group.Go(func() error {
-			reader, err := openArchiveWithMetadata(pakPath, unpackOptions.DumpMetadata)
+			reader, err := openArchive(pakPath)
 			if err != nil {
 				return err
 			}
@@ -89,7 +88,7 @@ func UnpackFileWithOptions(inputPak string, outputDir string, options *UnpackOpt
 		return Result{}, err
 	}
 
-	reader, err := openArchiveWithMetadata(inputPak, unpackOptions.DumpMetadata)
+	reader, err := openArchive(inputPak)
 	if err != nil {
 		return Result{}, err
 	}
@@ -131,11 +130,6 @@ func unpackParsedArchive(archive *parsedArchive, options UnpackOptions) error {
 	}
 	if err := archive.Reader.ExtractAll(archive.TargetDir, options.Threads); err != nil {
 		return err
-	}
-	if options.DumpMetadata {
-		if err := writeArchiveMetadata(archive.TargetDir, archive.Reader); err != nil {
-			return err
-		}
 	}
 	return archive.Reader.Close()
 }
@@ -180,7 +174,7 @@ func PackDirectory(inputDir string, outputDir string) (Result, error) {
 }
 
 func collectPakFiles(inputDir string) ([]string, error) {
-	entries, err := os.ReadDir(inputDir)
+	entries, err := readDirectoryEntries(inputDir)
 	if err != nil {
 		return nil, err
 	}
@@ -195,13 +189,11 @@ func collectPakFiles(inputDir string) ([]string, error) {
 		}
 		paths = append(paths, filepath.Join(inputDir, entry.Name()))
 	}
-
-	sort.Strings(paths)
 	return paths, nil
 }
 
 func collectArchiveDirectories(inputDir string) ([]string, error) {
-	entries, err := os.ReadDir(inputDir)
+	entries, err := readDirectoryEntries(inputDir)
 	if err != nil {
 		return nil, err
 	}
@@ -213,9 +205,18 @@ func collectArchiveDirectories(inputDir string) ([]string, error) {
 		}
 		paths = append(paths, filepath.Join(inputDir, entry.Name()))
 	}
-
-	sort.Strings(paths)
 	return paths, nil
+}
+
+func readDirectoryEntries(path string) ([]os.DirEntry, error) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	entries, readErr := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	return entries, errors.Join(readErr, closeErr)
 }
 
 func outputPath(rootDir string, archivePath string) string {

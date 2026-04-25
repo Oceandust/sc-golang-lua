@@ -17,8 +17,7 @@ type Result struct {
 }
 
 type UnpackOptions struct {
-	DumpMetadata bool
-	Threads      int
+	Threads int
 }
 
 type ArchiveInfo struct {
@@ -43,16 +42,13 @@ type ArchiveHeaderInfo struct {
 }
 
 type ArchiveTablesInfo struct {
-	NameRecordCount          int    `json:"name_record_count"`
-	FileIndexCount           int    `json:"file_index_count"`
-	FileEntryCount           int    `json:"file_entry_count"`
-	ChunkCount               int    `json:"chunk_count"`
-	CompressedFileTableSize  int32  `json:"compressed_file_table_size"`
-	CompressedChunkTableSize int32  `json:"compressed_chunk_table_size"`
-	HeaderEnd                int64  `json:"header_end"`
-	NameTable                string `json:"name_table,omitempty"`
-	FileTable                string `json:"file_table,omitempty"`
-	ChunkTable               string `json:"chunk_table,omitempty"`
+	NameRecordCount          int   `json:"name_record_count"`
+	FileIndexCount           int   `json:"file_index_count"`
+	FileEntryCount           int   `json:"file_entry_count"`
+	ChunkCount               int   `json:"chunk_count"`
+	CompressedFileTableSize  int32 `json:"compressed_file_table_size"`
+	CompressedChunkTableSize int32 `json:"compressed_chunk_table_size"`
+	HeaderEnd                int64 `json:"header_end"`
 }
 
 type ArchiveNameRecordInfo struct {
@@ -62,23 +58,20 @@ type ArchiveNameRecordInfo struct {
 }
 
 type ArchiveFileInfo struct {
-	Index       int                `json:"index"`
-	ArchivePath string             `json:"archive_path,omitempty"`
-	FileSize    int32              `json:"file_size"`
-	NameOffset  int32              `json:"name_offset"`
-	ChunkCount  int32              `json:"chunk_count"`
-	ChunkIndex  int32              `json:"chunk_index"`
-	SHA1        string             `json:"sha1,omitempty"`
-	Chunks      []ArchiveChunkInfo `json:"chunks,omitempty"`
+	Index       int    `json:"index"`
+	ArchivePath string `json:"archive_path,omitempty"`
+	FileSize    int32  `json:"file_size"`
+	NameOffset  int32  `json:"name_offset"`
+	ChunkCount  int32  `json:"chunk_count"`
+	ChunkIndex  int32  `json:"chunk_index"`
 }
 
 type ArchiveChunkInfo struct {
-	Index            int    `json:"index"`
-	FileOffset       int32  `json:"file_offset"`
-	UncompressedSize int32  `json:"uncompressed_size"`
-	DataOffset       int32  `json:"data_offset"`
-	CompressedSize   int32  `json:"compressed_size"`
-	Payload          string `json:"payload,omitempty"`
+	Index            int   `json:"index"`
+	FileOffset       int32 `json:"file_offset"`
+	UncompressedSize int32 `json:"uncompressed_size"`
+	DataOffset       int32 `json:"data_offset"`
+	CompressedSize   int32 `json:"compressed_size"`
 }
 
 type archiveHeader struct {
@@ -120,9 +113,6 @@ type archiveLayout struct {
 	FileEntries              []fileEntry
 	Files                    []archiveFile
 	Chunks                   []chunkEntry
-	CompressedNameTable      []byte
-	CompressedFileTable      []byte
-	CompressedChunkTable     []byte
 	CompressedFileTableSize  int32
 	CompressedChunkTableSize int32
 	HeaderEnd                int64

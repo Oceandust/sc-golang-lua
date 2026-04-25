@@ -17,16 +17,12 @@ type archiveReader struct {
 }
 
 func openArchive(path string) (*archiveReader, error) {
-	return openArchiveWithMetadata(path, true)
-}
-
-func openArchiveWithMetadata(path string, preserveMetadata bool) (*archiveReader, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 
-	layout, err := readArchiveLayout(file, preserveMetadata)
+	layout, err := readArchiveLayout(file)
 	if err != nil {
 		_ = file.Close()
 		return nil, err
@@ -47,7 +43,7 @@ func (reader *archiveReader) Close() error {
 	return file.Close()
 }
 
-func readArchiveLayout(file *os.File, preserveMetadata bool) (*archiveLayout, error) {
+func readArchiveLayout(file *os.File) (*archiveLayout, error) {
 	var signature [4]byte
 	if _, err := io.ReadFull(file, signature[:]); err != nil {
 		return nil, err
@@ -71,10 +67,6 @@ func readArchiveLayout(file *os.File, preserveMetadata bool) (*archiveLayout, er
 	compressedNames := make([]byte, int(header.CompressedNameTableSize))
 	if _, err := io.ReadFull(file, compressedNames); err != nil {
 		return nil, err
-	}
-	var rawCompressedNames []byte
-	if preserveMetadata {
-		rawCompressedNames = append([]byte(nil), compressedNames...)
 	}
 	if err := xorFirstWord(compressedNames, uint32(header.FileCount)); err != nil {
 		return nil, err
@@ -117,10 +109,6 @@ func readArchiveLayout(file *os.File, preserveMetadata bool) (*archiveLayout, er
 	if _, err := io.ReadFull(file, compressedFileTable); err != nil {
 		return nil, err
 	}
-	var rawCompressedFileTable []byte
-	if preserveMetadata {
-		rawCompressedFileTable = append([]byte(nil), compressedFileTable...)
-	}
 	if err := xorFirstWord(compressedFileTable, uint32(header.FileCount+compressedFileTableSize)); err != nil {
 		return nil, err
 	}
@@ -152,10 +140,6 @@ func readArchiveLayout(file *os.File, preserveMetadata bool) (*archiveLayout, er
 	compressedChunkTable := make([]byte, int(compressedChunkTableSize))
 	if _, err := io.ReadFull(file, compressedChunkTable); err != nil {
 		return nil, err
-	}
-	var rawCompressedChunkTable []byte
-	if preserveMetadata {
-		rawCompressedChunkTable = append([]byte(nil), compressedChunkTable...)
 	}
 	if err := xorFirstWord(compressedChunkTable, uint32(header.FileCount+compressedChunkTableSize+chunkCount)); err != nil {
 		return nil, err
@@ -198,9 +182,6 @@ func readArchiveLayout(file *os.File, preserveMetadata bool) (*archiveLayout, er
 		FileEntries:              fileEntries,
 		Files:                    files,
 		Chunks:                   chunks,
-		CompressedNameTable:      rawCompressedNames,
-		CompressedFileTable:      rawCompressedFileTable,
-		CompressedChunkTable:     rawCompressedChunkTable,
 		CompressedFileTableSize:  compressedFileTableSize,
 		CompressedChunkTableSize: compressedChunkTableSize,
 		HeaderEnd:                headerEnd,
@@ -377,16 +358,6 @@ func (reader *archiveReader) writeChunk(destination io.Writer, chunk *chunkEntry
 	}
 
 	return rawInflateToWriter(section, destination)
-}
-
-func (reader *archiveReader) writeRawChunk(destination io.Writer, chunk *chunkEntry) error {
-	section, err := reader.chunkSection(chunk)
-	if err != nil {
-		return err
-	}
-
-	_, err = io.CopyN(destination, section, int64(chunk.CompressedSize))
-	return err
 }
 
 func (reader *archiveReader) chunkSection(chunk *chunkEntry) (*io.SectionReader, error) {
